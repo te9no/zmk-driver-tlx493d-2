@@ -15,6 +15,10 @@ LOG_MODULE_REGISTER(tlx493d, CONFIG_INPUT_LOG_LEVEL);
 #define HYSTERESIS_HIGH_THRESHOLD 15  // 動きを検出する上側しきい値
 #define HYSTERESIS_LOW_THRESHOLD  5   // 動きを停止する下側しきい値
 
+#define TLX493D_LOG_INTERVAL_MS 3000
+#define TLX493D_SENSITIVITY_DIVISOR 10
+#define TLX493D_CALIBRATION_DELAY_MS 50
+
 struct tlx493d_data {
     const struct device *dev;
     struct k_work_delayable work;
@@ -63,7 +67,7 @@ static int tlx493d_calibrate(const struct device *dev) {
     int ret;
     
     // センサーの値が安定するまで少し待機
-    k_sleep(K_MSEC(50));
+    k_sleep(K_MSEC(TLX493D_CALIBRATION_DELAY_MS));
     
     // 現在の値を読み取り、基準値として保存
     ret = tlx493d_read_sensor_data(dev, &x, &y, &z);
@@ -118,7 +122,7 @@ static void tlx493d_work_cb(struct k_work *work) {
 
         // Log sensor values every 3 seconds
         uint32_t now = k_uptime_get_32();
-        if ((now - data->log_timer) >= 3000) {
+        if ((now - data->log_timer) >= TLX493D_LOG_INTERVAL_MS) {
             LOG_INF("Sensor values - X: %d (%+d), Y: %d (%+d), Z: %d [%s]",
                    x, dx, y, dy, z, data->movement_active ? "ACTIVE" : "IDLE");
             data->log_timer = now;
@@ -126,8 +130,8 @@ static void tlx493d_work_cb(struct k_work *work) {
         
         // 動きを報告
         if (report_movement) {
-            input_report_rel(data->dev, INPUT_REL_X, dx / 10, false, K_FOREVER);
-            input_report_rel(data->dev, INPUT_REL_Y, dy / 10, true, K_FOREVER);
+            input_report_rel(data->dev, INPUT_REL_X, dx / TLX493D_SENSITIVITY_DIVISOR, false, K_FOREVER);
+            input_report_rel(data->dev, INPUT_REL_Y, dy / TLX493D_SENSITIVITY_DIVISOR, true, K_FOREVER);
             
             data->last_x = x;
             data->last_y = y;
@@ -199,8 +203,6 @@ static int tlx493d_init(const struct device *dev) {
 #if IS_ENABLED(CONFIG_PM_DEVICE)
 
 static int tlx493d_pm_action(const struct device *dev, enum pm_device_action action) {
-    struct tlx493d_data *data = dev->data;
-    
     switch (action) {
     case PM_DEVICE_ACTION_SUSPEND:
         return tlx493d_set_sleep(dev, true);
