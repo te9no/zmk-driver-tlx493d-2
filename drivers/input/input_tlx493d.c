@@ -19,6 +19,9 @@ LOG_MODULE_REGISTER(tlx493d, CONFIG_INPUT_LOG_LEVEL);
 #define TLX493D_SENSITIVITY_DIVISOR 10
 #define TLX493D_CALIBRATION_DELAY_MS 50
 
+#define GRAPH_WIDTH 40     // グラフの最大幅
+#define GRAPH_SCALE 100    // グラフのスケール（値をこの値で割って正規化）
+
 struct tlx493d_data {
     const struct device *dev;
     struct k_work_delayable work;
@@ -85,6 +88,23 @@ static int tlx493d_calibrate(const struct device *dev) {
     return 0;
 }
 
+static void log_bar_graph(const char *label, int16_t value) {
+    char bar[GRAPH_WIDTH + 1] = {0};
+    int bars = (abs(value) * GRAPH_WIDTH) / GRAPH_SCALE;
+    if (bars > GRAPH_WIDTH) bars = GRAPH_WIDTH;
+
+    // 棒グラフの作成
+    if (value > 0) {
+        memset(bar, '>', bars);
+    } else {
+        memset(bar, '<', bars);
+    }
+    
+    LOG_INF("%s: %4d [%c%s%*s]", label, value, 
+            value >= 0 ? '|' : ' ', bar, 
+            GRAPH_WIDTH - bars, "");
+}
+
 static void tlx493d_work_cb(struct k_work *work) {
     struct tlx493d_data *data = CONTAINER_OF(work, struct tlx493d_data, work.work);
     int16_t x, y, z;
@@ -99,6 +119,7 @@ static void tlx493d_work_cb(struct k_work *work) {
         // キャリブレーション基準値からの相対値を計算
         int16_t dx = x - data->calib_x;
         int16_t dy = y - data->calib_y;
+        int16_t dz = z - data->calib_z;
         
         // ヒステリシス制御による動き検出
         bool report_movement = false;
@@ -120,14 +141,16 @@ static void tlx493d_work_cb(struct k_work *work) {
             }
         }
 
-        // Log sensor values every 3 seconds
+        // センサー値のログ出力
         uint32_t now = k_uptime_get_32();
         if ((now - data->log_timer) >= TLX493D_LOG_INTERVAL_MS) {
-            LOG_INF("Sensor values - X: %d (%+d), Y: %d (%+d), Z: %d [%s]",
-                   x, dx, y, dy, z, data->movement_active ? "ACTIVE" : "IDLE");
+            LOG_INF("Sensor values [%s]:", data->movement_active ? "ACTIVE" : "IDLE");
+            log_bar_graph("X", dx);
+            log_bar_graph("Y", dy);
+            log_bar_graph("Z", dz);
             data->log_timer = now;
         }
-        
+
         // 動きを報告
         if (report_movement) {
             input_report_rel(data->dev, INPUT_REL_X, dx / TLX493D_SENSITIVITY_DIVISOR, false, K_FOREVER);
