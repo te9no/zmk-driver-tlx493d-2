@@ -13,12 +13,3 @@ properties:
     type: int
     default: 10
     description: Polling interval in milliseconds
-
-  power-mode:
-    type: string
-    enum:
-      - "mcm"      # Master Controlled Mode
-      - "low-power" # Low Power Mode
-    default: "mcm"
-    description: Initial power mode setting
-

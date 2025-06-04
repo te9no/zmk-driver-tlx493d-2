@@ -4,6 +4,7 @@
 #include <zephyr/init.h>
 #include <zephyr/input/input.h>
 #include <zephyr/pm/device.h>
+#include <stdlib.h>
 
 #include <zephyr/logging/log.h>
 
@@ -18,11 +19,11 @@ struct tlx493d_data {
     int16_t last_y;
     int16_t last_z;
     bool sleep_mode;
+    uint32_t log_timer;  // Add timer for logging
 };
 
 struct tlx493d_config {
     struct i2c_dt_spec i2c;
-    uint32_t polling_interval_ms;
 };
 
 static int tlx493d_read_sensor_data(const struct device *dev, int16_t *x, int16_t *y, int16_t *z) {
@@ -50,16 +51,22 @@ static int tlx493d_read_sensor_data(const struct device *dev, int16_t *x, int16_
 
 static void tlx493d_work_cb(struct k_work *work) {
     struct tlx493d_data *data = CONTAINER_OF(work, struct tlx493d_data, work.work);
-    const struct tlx493d_config *config = data->dev->config;
     int16_t x, y, z;
     
     if (data->sleep_mode) {
         // Skip reading when in sleep mode
-        k_work_reschedule(&data->work, K_MSEC(config->polling_interval_ms));
+        k_work_reschedule(&data->work, K_MSEC(CONFIG_INPUT_TLX493D_POLLING_INTERVAL_MS));
         return;
     }
 
     if (tlx493d_read_sensor_data(data->dev, &x, &y, &z) == 0) {
+        // Log sensor values every 3 seconds
+        uint32_t now = k_uptime_get_32();
+        if ((now - data->log_timer) >= 3000) {
+            LOG_INF("Sensor values - X: %d, Y: %d, Z: %d", x, y, z);
+            data->log_timer = now;
+        }
+
         // Calculate relative movement
         int16_t dx = x - data->last_x;
         int16_t dy = y - data->last_y;
@@ -76,7 +83,7 @@ static void tlx493d_work_cb(struct k_work *work) {
         }
     }
 
-    k_work_reschedule(&data->work, K_MSEC(config->polling_interval_ms));
+    k_work_reschedule(&data->work, K_MSEC(CONFIG_INPUT_TLX493D_POLLING_INTERVAL_MS));
 }
 
 int tlx493d_set_sleep(const struct device *dev, bool sleep) {
@@ -119,22 +126,25 @@ static int tlx493d_init(const struct device *dev) {
 
     data->dev = dev;
     data->sleep_mode = false;
+    data->log_timer = k_uptime_get_32();  // Initialize log timer
 
     // Initialize and start polling work
     k_work_init_delayable(&data->work, tlx493d_work_cb);
-    k_work_schedule(&data->work, K_MSEC(config->polling_interval_ms));
+    k_work_schedule(&data->work, K_MSEC(CONFIG_INPUT_TLX493D_POLLING_INTERVAL_MS));
 
     return 0;
 }
 
 #if IS_ENABLED(CONFIG_PM_DEVICE)
 
-static int TLX493D_pm_action(const struct device *dev, enum pm_device_action action) {
+static int tlx493d_pm_action(const struct device *dev, enum pm_device_action action) {
+    struct tlx493d_data *data = dev->data;
+    
     switch (action) {
     case PM_DEVICE_ACTION_SUSPEND:
-        return set_int(dev, false);
+        return tlx493d_set_sleep(dev, true);
     case PM_DEVICE_ACTION_RESUME:
-        return set_int(dev, true);
+        return tlx493d_set_sleep(dev, false);
     default:
         return -ENOTSUP;
     }
@@ -146,7 +156,6 @@ static int TLX493D_pm_action(const struct device *dev, enum pm_device_action act
     static struct tlx493d_data tlx493d_data_##n; \
     static const struct tlx493d_config tlx493d_config_##n = { \
         .i2c = I2C_DT_SPEC_INST_GET(n), \
-        .polling_interval_ms = DT_INST_PROP(n, polling_interval_ms), \
     }; \
     PM_DEVICE_DT_INST_DEFINE(n, tlx493d_pm_action); \
     DEVICE_DT_INST_DEFINE(n, tlx493d_init, \

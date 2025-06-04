@@ -16,6 +16,13 @@ config INPUT_TLX493D_INIT_PRIORITY
     int "TLX493D initialization priority"
     default INPUT_INIT_PRIORITY
 
+config INPUT_TLX493D_POLLING_INTERVAL_MS
+    int "Polling interval in milliseconds"
+    default 10
+    range 1 1000
+    help
+      Interval between sensor readings in milliseconds.
+
 if ZMK_MOUSE
 
 config ZMK_INPUT_TLX493D_IDLE_SLEEPER
