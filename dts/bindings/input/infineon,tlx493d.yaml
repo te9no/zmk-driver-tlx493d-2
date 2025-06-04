@@ -1,33 +1,24 @@
 description: |
-  Sensor driver for the Cirque Pinnacle trackpad ASICs, using the I2C interface
+  Infineon TLX493D 3D magnetic sensor driver
 
 compatible: "infineon,tlx493d"
 
+include: i2c-device.yaml
+
 properties:
-  rotate-90:
-    type: boolean
-  x-invert:
-    type: boolean
-  y-invert:
-    type: boolean
-  sleep:
-    type: boolean
-  no-secondary-tap:
-    type: boolean
-  no-taps:
-    type: boolean
-  sensitivity:
+  reg:
+    required: true
+  
+  polling-interval-ms:
+    type: int
+    default: 10
+    description: Polling interval in milliseconds
+
+  power-mode:
     type: string
     enum:
-      - 1x
-      - 2x
-      - 3x
-      - 4x
-    description: ADC attenuation (sensitivity) setting.
-  x-axis-z-min:
-    type: int
-    default: 5
-  y-axis-z-min:
-    type: int
-    default: 4
+      - "mcm"      # Master Controlled Mode
+      - "low-power" # Low Power Mode
+    default: "mcm"
+    description: Initial power mode setting
 

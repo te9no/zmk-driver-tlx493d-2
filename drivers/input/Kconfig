@@ -2,13 +2,11 @@
 # SPDX-License-Identifier: MIT
 
 menuconfig INPUT_TLX493D
-    bool "Cirque Pinnacle trackpads"
+    bool "Infineon TLX493D 3D magnetic sensor"
     default y
-    depends on GPIO
-#    depends on SPI || I2C
     depends on I2C
     depends on INPUT
-    depends on DT_HAS_TLX493D_ENABLED
+    depends on DT_HAS_INFINEON_TLX493D_ENABLED
     help
       Enable driver for Infineon TLX493D 3D magnetic sensor.
 
@@ -21,9 +19,11 @@ config INPUT_TLX493D_INIT_PRIORITY
 if ZMK_MOUSE
 
 config ZMK_INPUT_TLX493D_IDLE_SLEEPER
-    bool "TLX493D Sleep linked to ZMK idle state"
-    default n
+    bool "Enable TLX493D sleep mode during ZMK idle"
+    default y
+    help
+      Puts the TLX493D into low power mode when ZMK enters idle state.
 
-endif
+endif # ZMK_MOUSE
 
-endif
+endif # INPUT_TLX493D

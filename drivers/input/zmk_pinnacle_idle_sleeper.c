@@ -13,7 +13,7 @@ LOG_MODULE_REGISTER(TLX493D_sleeper, CONFIG_INPUT_LOG_LEVEL);
 #define GET_TLX493D(node_id) DEVICE_DT_GET(node_id),
 
 static const struct device *TLX493D_devs[] = {
-    DT_FOREACH_STATUS_OKAY(cirque_TLX493D, GET_TLX493D)
+    DT_FOREACH_STATUS_OKAY(TLX493D, GET_TLX493D)
 };
 
 static int on_activity_state(const zmk_event_t *eh) {
