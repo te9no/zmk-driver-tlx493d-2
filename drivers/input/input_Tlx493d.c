@@ -167,3 +167,4 @@ static int tlx493d_pm_action(const struct device *dev, enum pm_device_action act
                          NULL);
 
 DT_INST_FOREACH_STATUS_OKAY(TLX493D_INIT)
+

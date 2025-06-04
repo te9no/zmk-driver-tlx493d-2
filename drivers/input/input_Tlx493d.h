@@ -21,3 +21,4 @@
 
 /* Function Declarations */
 int tlx493d_set_sleep(const struct device *dev, bool sleep);
+
