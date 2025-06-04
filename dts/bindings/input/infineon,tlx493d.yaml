@@ -1,7 +1,9 @@
+description: |
+  Sensor driver for the Cirque Pinnacle trackpad ASICs, using the I2C interface
+
+compatible: "infineon,tlx493d"
+
 properties:
-  dr-gpios:
-    type: phandle-array
-    description: Data ready pin for the trackpad
   rotate-90:
     type: boolean
   x-invert:

@@ -1,26 +1,27 @@
 # Copyright (c) 2022 The ZMK Contributors
 # SPDX-License-Identifier: MIT
 
-menuconfig INPUT_PINNACLE
+menuconfig INPUT_TLX493D
     bool "Cirque Pinnacle trackpads"
     default y
     depends on GPIO
-    depends on SPI || I2C
+#    depends on SPI || I2C
+    depends on I2C
     depends on INPUT
-    depends on DT_HAS_CIRQUE_PINNACLE_ENABLED
+    depends on DT_HAS_TLX493D_ENABLED
     help
-      Enable driver for Cirque Pinnacle trackpads
+      Enable driver for Infineon TLX493D 3D magnetic sensor.
 
-if INPUT_PINNACLE
+if INPUT_TLX493D
 
-config INPUT_PINNACLE_INIT_PRIORITY
-    int "Cirque Pinnacle initialization priority"
+config INPUT_TLX493D_INIT_PRIORITY
+    int "TLX493D initialization priority"
     default INPUT_INIT_PRIORITY
 
 if ZMK_MOUSE
 
-config ZMK_INPUT_PINNACLE_IDLE_SLEEPER
-    bool "Pinnacle Sleep linked to ZMK idle state"
+config ZMK_INPUT_TLX493D_IDLE_SLEEPER
+    bool "TLX493D Sleep linked to ZMK idle state"
     default n
 
 endif
