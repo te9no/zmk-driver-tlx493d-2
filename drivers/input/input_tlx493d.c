@@ -12,6 +12,9 @@
 
 LOG_MODULE_REGISTER(tlx493d, CONFIG_INPUT_LOG_LEVEL);
 
+#define HYSTERESIS_HIGH_THRESHOLD 15  // 動きを検出する上側しきい値
+#define HYSTERESIS_LOW_THRESHOLD  5   // 動きを停止する下側しきい値
+
 struct tlx493d_data {
     const struct device *dev;
     struct k_work_delayable work;
@@ -20,6 +23,11 @@ struct tlx493d_data {
     int16_t last_z;
     bool sleep_mode;
     uint32_t log_timer;  // Add timer for logging
+    int16_t calib_x;    // キャリブレーション基準値
+    int16_t calib_y;
+    int16_t calib_z;
+    bool calibrated;    // キャリブレーション完了フラグ
+    bool movement_active;  // 動きの状態を追跡
 };
 
 struct tlx493d_config {
@@ -49,6 +57,30 @@ static int tlx493d_read_sensor_data(const struct device *dev, int16_t *x, int16_
     return 0;
 }
 
+static int tlx493d_calibrate(const struct device *dev) {
+    struct tlx493d_data *data = dev->data;
+    int16_t x, y, z;
+    int ret;
+    
+    // センサーの値が安定するまで少し待機
+    k_sleep(K_MSEC(50));
+    
+    // 現在の値を読み取り、基準値として保存
+    ret = tlx493d_read_sensor_data(dev, &x, &y, &z);
+    if (ret < 0) {
+        LOG_ERR("Calibration failed: %d", ret);
+        return ret;
+    }
+    
+    data->calib_x = x;
+    data->calib_y = y;
+    data->calib_z = z;
+    data->calibrated = true;
+    
+    LOG_INF("Calibration done - X: %d, Y: %d, Z: %d", x, y, z);
+    return 0;
+}
+
 static void tlx493d_work_cb(struct k_work *work) {
     struct tlx493d_data *data = CONTAINER_OF(work, struct tlx493d_data, work.work);
     int16_t x, y, z;
@@ -60,23 +92,43 @@ static void tlx493d_work_cb(struct k_work *work) {
     }
 
     if (tlx493d_read_sensor_data(data->dev, &x, &y, &z) == 0) {
+        // キャリブレーション基準値からの相対値を計算
+        int16_t dx = x - data->calib_x;
+        int16_t dy = y - data->calib_y;
+        
+        // ヒステリシス制御による動き検出
+        bool report_movement = false;
+        int16_t abs_dx = abs(dx);
+        int16_t abs_dy = abs(dy);
+        
+        if (!data->movement_active) {
+            // 非アクティブ状態での判定（上側しきい値）
+            if (abs_dx > HYSTERESIS_HIGH_THRESHOLD || abs_dy > HYSTERESIS_HIGH_THRESHOLD) {
+                data->movement_active = true;
+                report_movement = true;
+            }
+        } else {
+            // アクティブ状態での判定（下側しきい値）
+            if (abs_dx > HYSTERESIS_LOW_THRESHOLD || abs_dy > HYSTERESIS_LOW_THRESHOLD) {
+                report_movement = true;
+            } else {
+                data->movement_active = false;
+            }
+        }
+
         // Log sensor values every 3 seconds
         uint32_t now = k_uptime_get_32();
         if ((now - data->log_timer) >= 3000) {
-            LOG_INF("Sensor values - X: %d, Y: %d, Z: %d", x, y, z);
+            LOG_INF("Sensor values - X: %d (%+d), Y: %d (%+d), Z: %d [%s]",
+                   x, dx, y, dy, z, data->movement_active ? "ACTIVE" : "IDLE");
             data->log_timer = now;
         }
-
-        // Calculate relative movement
-        int16_t dx = x - data->last_x;
-        int16_t dy = y - data->last_y;
         
-        // Report relative movement if it exceeds threshold
-        if (abs(dx) > 10 || abs(dy) > 10) {
+        // 動きを報告
+        if (report_movement) {
             input_report_rel(data->dev, INPUT_REL_X, dx / 10, false, K_FOREVER);
             input_report_rel(data->dev, INPUT_REL_Y, dy / 10, true, K_FOREVER);
             
-            // Update last values
             data->last_x = x;
             data->last_y = y;
             data->last_z = z;
@@ -126,7 +178,16 @@ static int tlx493d_init(const struct device *dev) {
 
     data->dev = dev;
     data->sleep_mode = false;
-    data->log_timer = k_uptime_get_32();  // Initialize log timer
+    data->log_timer = k_uptime_get_32();
+    data->calibrated = false;
+    data->movement_active = false;  // 初期状態は非アクティブ
+
+    // センサーのキャリブレーションを実行
+    ret = tlx493d_calibrate(dev);
+    if (ret < 0) {
+        LOG_ERR("Failed to calibrate sensor");
+        return ret;
+    }
 
     // Initialize and start polling work
     k_work_init_delayable(&data->work, tlx493d_work_cb);
