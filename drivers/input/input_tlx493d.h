@@ -45,4 +45,5 @@
 
 /* Function Declarations */
 int tlx493d_set_sleep(const struct device *dev, bool sleep);
+int tlx493d_calibrate(const struct device *dev);
 

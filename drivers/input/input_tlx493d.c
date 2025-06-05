@@ -166,6 +166,32 @@ static int tlx493d_reset(const struct device *dev) {
     return 0;
 }
 
+static int tlx493d_calibrate(const struct device *dev) {
+    struct tlx493d_data *data = dev->data;
+    int16_t x, y, z;
+    int ret;
+
+    // Wait for sensor to stabilize after power up
+    k_sleep(K_MSEC(TLX493D_CALIBRATION_DELAY_MS));
+
+    // Read initial values
+    ret = tlx493d_read_sensor_data(dev, &x, &y, &z);
+    if (ret < 0) {
+        LOG_ERR("Failed to read calibration data: %d", ret);
+        return ret;
+    }
+
+    // Store initial values as reference
+    data->last_x = x;
+    data->last_y = y;
+    data->last_z = z;
+
+    LOG_INF("Calibration values - X: %d, Y: %d, Z: %d", x, y, z);
+    data->calibrated = true;
+
+    return 0;
+}
+
 static int tlx493d_init(const struct device *dev) {
     struct tlx493d_data *data = dev->data;
     const struct tlx493d_config *config = dev->config;
