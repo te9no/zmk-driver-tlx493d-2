@@ -166,7 +166,7 @@ static int tlx493d_reset(const struct device *dev) {
     return 0;
 }
 
-static int tlx493d_calibrate(const struct device *dev) {
+int tlx493d_calibrate(const struct device *dev) {
     struct tlx493d_data *data = dev->data;
     int16_t x, y, z;
     int ret;
