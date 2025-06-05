@@ -32,6 +32,8 @@ struct tlx493d_data {
     bool active_x;        // X軸の動作状態
     bool active_y;        // Y軸の動作状態
     float scale;         // 変換係数
+    bool calibrated;         // Add missing member
+    bool movement_active;    // Add missing member
 };
 
 struct tlx493d_config {
