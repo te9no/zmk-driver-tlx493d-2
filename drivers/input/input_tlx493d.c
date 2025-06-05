@@ -179,7 +179,6 @@ static int tlx493d_init(const struct device *dev) {
     if (ret < 0) {
         return ret;
     }
-    LOG_INF("Current mode: 0x%02x", mode);
 
     data->dev = dev;
     data->sleep_mode = false;
