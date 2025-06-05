@@ -6,9 +6,8 @@
 #include <zephyr/pm/device.h>
 #include <stdlib.h>
 
-#include <zephyr/logging/log.h>
-
 #include "input_tlx493d.h"
+#include <zephyr/logging/log.h>
 
 LOG_MODULE_REGISTER(tlx493d, CONFIG_INPUT_LOG_LEVEL);
 
@@ -43,23 +42,19 @@ struct tlx493d_config {
 
 static int tlx493d_read_sensor_data(const struct device *dev, int16_t *x, int16_t *y, int16_t *z) {
     const struct tlx493d_config *config = dev->config;
-    uint8_t data[7];
+    uint8_t data[6];
     
-    int ret = i2c_burst_read_dt(&config->i2c, TLX493D_READ_REG, data, sizeof(data));
+    // TLX493Dの各軸のデータを読み取り
+    int ret = i2c_burst_read_dt(&config->i2c, TLX493D_R_BX, data, sizeof(data));
     if (ret < 0) {
         LOG_ERR("Failed to read sensor data: %d", ret);
         return ret;
     }
 
     // Convert raw data to 12-bit signed values per datasheet
-    *x = ((data[0] << 4) | (data[4] >> 4)) << 4;
-    *x >>= 4; // Sign extend
-    
-    *y = ((data[1] << 4) | (data[4] & 0x0F)) << 4;
-    *y >>= 4;
-    
-    *z = ((data[2] << 4) | (data[5] >> 4)) << 4;
-    *z >>= 4;
+    *x = ((data[0] << 4) | (data[1] >> 4));
+    *y = ((data[2] << 4) | (data[3] >> 4));
+    *z = ((data[4] << 4) | (data[5] >> 4));
 
     return 0;
 }
@@ -175,13 +170,144 @@ int tlx493d_set_sleep(const struct device *dev, bool sleep) {
     // Set power mode according to sleep state
     mode = sleep ? TLX493D_POWER_MODE_LOW : TLX493D_POWER_MODE_MCM;
     
-    return i2c_reg_write_byte_dt(&config->i2c, TLX493D_MOD1_REG, mode);
+    return i2c_reg_write_byte_dt(&config->i2c, TLX493D_R_MOD1, mode);
+}
+
+static int tlx493d_i2c_read_retried(const struct device *dev, uint8_t reg, uint8_t *data, size_t len) {
+    const struct tlx493d_config *config = dev->config;
+    int ret;
+
+    for (int i = 0; i < TLX493D_I2C_RETRIES; i++) {
+        ret = i2c_burst_read_dt(&config->i2c, reg, data, len);
+        if (ret == 0) {
+            return 0;
+        }
+        k_sleep(K_MSEC(TLX493D_I2C_RETRY_DELAY_MS));
+    }
+    
+    return ret;
+}
+
+static int tlx493d_i2c_init(const struct device *dev) {
+    const struct tlx493d_config *config = dev->config;
+    int ret;
+
+    // Simple communication test with the device
+    uint8_t test_byte;
+    ret = i2c_reg_read_byte_dt(&config->i2c, TLX493D_R_ID, &test_byte);
+    if (ret < 0) {
+        LOG_ERR("I2C communication test failed: %d", ret);
+        return ret;
+    }
+
+    return 0;
+}
+
+static int tlx493d_verify_id(const struct device *dev) {
+    const struct tlx493d_config *config = dev->config;
+    uint8_t id;
+    int ret;
+
+    // まずI2C通信を初期化
+    ret = tlx493d_i2c_init(dev);
+    if (ret < 0) {
+        LOG_ERR("I2C initialization failed");
+        return ret;
+    }
+
+    for (int i = 0; i < TLX493D_INIT_RETRY_COUNT; i++) {
+        ret = i2c_reg_read_byte_dt(&config->i2c, TLX493D_R_ID, &id);
+        if (ret >= 0) {
+            uint8_t product_id = id & TLX493D_PRODUCT_ID_MASK;
+            uint8_t version = id & TLX493D_VERSION_MASK;
+            
+            LOG_INF("Read ID: 0x%02x (Product: 0x%02x, Version: 0x%02x)",
+                   id, product_id, version);
+                   
+            if (product_id == TLX493D_PRODUCT_ID) {
+                return 0;
+            }
+            LOG_WRN("Unexpected product ID: 0x%02x", product_id);
+        } else {
+            LOG_ERR("Failed to read ID: %d (0x%08x)", ret, ret);
+        }
+        
+        LOG_INF("Retrying device identification (%d/%d)", i + 1, TLX493D_INIT_RETRY_COUNT);
+        k_sleep(K_MSEC(TLX493D_INIT_RETRY_DELAY_MS));
+    }
+    
+    LOG_ERR("Device identification failed after %d attempts", TLX493D_INIT_RETRY_COUNT);
+    return -ENODEV;
+}
+
+static int tlx493d_reset(const struct device *dev) {
+    const struct tlx493d_config *config = dev->config;
+    int ret;
+
+    // 1. Power down
+    ret = i2c_reg_write_byte_dt(&config->i2c, TLX493D_R_MOD1, 0x00);
+    if (ret < 0) return ret;
+    LOG_INF("Power down command sent");
+    k_sleep(K_MSEC(100));
+
+    // 2. ソフトリセット実行
+    ret = i2c_reg_write_byte_dt(&config->i2c, TLX493D_R_MOD1, 0x01);
+    if (ret < 0) return ret;
+    LOG_INF("Soft reset command sent");
+    k_sleep(K_MSEC(100));
+
+    // 3. Master Controlled Mode設定
+    // PRD[1:0]=01, IICadr=1, MOD=01 -> 0x15
+    ret = i2c_reg_write_byte_dt(&config->i2c, TLX493D_R_MOD1, 0x15);
+    if (ret < 0) return ret;
+    LOG_INF("Master Controlled Mode set");
+    k_sleep(K_MSEC(100));
+
+    // 4. センサー設定
+    // P=0, T=1, Fast=1 -> 0x90
+    ret = i2c_reg_write_byte_dt(&config->i2c, TLX493D_R_CONFIG, 0x90);
+    if (ret < 0) return ret;
+    LOG_INF("Sensor configuration set to 0x90");
+    
+    return 0;
+}
+
+static const struct tlx493d_retry_config INIT_RETRY = {
+    .retries = TLX493D_INIT_RETRY_COUNT,
+    .delay_ms = TLX493D_INIT_RETRY_DELAY_MS
+};
+
+static const struct tlx493d_retry_config I2C_RETRY = {
+    .retries = TLX493D_I2C_RETRIES,
+    .delay_ms = TLX493D_I2C_RETRY_DELAY_MS
+};
+
+static int tlx493d_i2c_write_with_retry(const struct device *dev, uint8_t reg, uint8_t *data, size_t len,
+                                       const struct tlx493d_retry_config *retry_config) {
+    const struct tlx493d_config *config = dev->config;
+    int ret;
+    
+    for (uint8_t attempt = 0; attempt <= retry_config->retries; attempt++) {
+        ret = i2c_burst_write_dt(&config->i2c, reg, data, len);
+        if (ret == 0) {
+            return 0;
+        }
+        
+        if (attempt < retry_config->retries) {
+            LOG_WRN("I2C write failed (attempt %d/%d): %d", 
+                    attempt + 1, retry_config->retries + 1, ret);
+            k_msleep(retry_config->delay_ms);
+        }
+    }
+    
+    LOG_ERR("I2C write failed after %d attempts: %d", 
+            retry_config->retries + 1, ret);
+    return ret;
 }
 
 static int tlx493d_init(const struct device *dev) {
     struct tlx493d_data *data = dev->data;
     const struct tlx493d_config *config = dev->config;
-    uint8_t chip_id;
     int ret;
 
     if (!device_is_ready(config->i2c.bus)) {
@@ -189,19 +315,22 @@ static int tlx493d_init(const struct device *dev) {
         return -ENODEV;
     }
 
-    // Read and verify chip ID
-    ret = i2c_reg_read_byte_dt(&config->i2c, TLX493D_WHOAMI_REG, &chip_id);
-    if (ret < 0 || chip_id != TLX493D_CHIP_ID) {
-        LOG_ERR("Failed to verify chip ID");
-        return -EINVAL;
-    }
+    LOG_INF("Initializing TLX493D");
 
-    // Initialize sensor in Master Controlled Mode
-    ret = i2c_reg_write_byte_dt(&config->i2c, TLX493D_MOD1_REG, TLX493D_POWER_MODE_MCM);
+    // デバイスの初期化
+    ret = tlx493d_reset(dev);
     if (ret < 0) {
-        LOG_ERR("Failed to set MCM mode");
         return ret;
     }
+
+    // 初期化後の動作モード確認
+    uint8_t mode;
+    ret = i2c_reg_read_byte_dt(&config->i2c, TLX493D_R_MOD1, &mode);
+    if (ret < 0) {
+        LOG_ERR("Failed to read mode: %d", ret);
+        return ret;
+    }
+    LOG_INF("Current mode: 0x%02x", mode);
 
     data->dev = dev;
     data->sleep_mode = false;
