@@ -20,6 +20,9 @@ struct tlx493d_data {
     int16_t last_z;
     bool sleep_mode;
     uint32_t log_timer;  // Add timer for logging
+    bool active_x;        // X軸の動作状態
+    bool active_y;        // Y軸の動作状態
+    float scale;         // 変換係数
 };
 
 struct tlx493d_config {
@@ -28,24 +31,40 @@ struct tlx493d_config {
 
 static int tlx493d_read_sensor_data(const struct device *dev, int16_t *x, int16_t *y, int16_t *z) {
     const struct tlx493d_config *config = dev->config;
-    uint8_t data[7];
+    uint8_t data[6];
+    int ret;
     
-    int ret = i2c_burst_read_dt(&config->i2c, TLX493D_READ_REG, data, sizeof(data));
+    // バースト読み出し（6バイト: BX, BY, BZ, TEMP, BX2, BZ2）
+    ret = i2c_burst_read_dt(&config->i2c, TLX493D_REG_B_X, data, sizeof(data));
     if (ret < 0) {
         LOG_ERR("Failed to read sensor data: %d", ret);
         return ret;
     }
 
-    // Convert raw data to 12-bit signed values per datasheet
-    *x = ((data[0] << 4) | (data[4] >> 4)) << 4;
-    *x >>= 4; // Sign extend
-    
-    *y = ((data[1] << 4) | (data[4] & 0x0F)) << 4;
-    *y >>= 4;
-    
-    *z = ((data[2] << 4) | (data[5] >> 4)) << 4;
-    *z >>= 4;
+    // データシートに従って12ビット値に変換
+    *x = ((data[0] << 4) | ((data[4] & 0xF0) >> 4));
+    *y = ((data[1] << 4) | (data[4] & 0x0F));
+    *z = ((data[2] << 4) | ((data[5] & 0xF0) >> 4));
 
+    // 12ビット符号付き整数への変換
+    if (*x & 0x800) *x |= 0xF000;
+    if (*y & 0x800) *y |= 0xF000;
+    if (*z & 0x800) *z |= 0xF000;
+
+    return 0;
+}
+
+static int convert_to_mouse_movement(float value, bool *is_active) {
+    if (!*is_active && (abs(value) > TLX493D_THRESHOLD)) {
+        *is_active = true;
+    } else if (*is_active && (abs(value) < (TLX493D_THRESHOLD - TLX493D_HYSTERESIS))) {
+        *is_active = false;
+    }
+
+    if (*is_active) {
+        float movement = value * TLX493D_SCALE;
+        return (int)CLAMP(movement, -10, 10);
+    }
     return 0;
 }
 
@@ -60,26 +79,24 @@ static void tlx493d_work_cb(struct k_work *work) {
     }
 
     if (tlx493d_read_sensor_data(data->dev, &x, &y, &z) == 0) {
-        // Log sensor values every 3 seconds
+        float x_val = (float)x;
+        float y_val = (float)y;
+        
+        int dx = convert_to_mouse_movement(x_val, &data->active_x);
+        int dy = convert_to_mouse_movement(y_val, &data->active_y);
+
+        // Log sensor values
         uint32_t now = k_uptime_get_32();
-        if ((now - data->log_timer) >= 3000) {
-            LOG_INF("Sensor values - X: %d, Y: %d, Z: %d", x, y, z);
+        if ((now - data->log_timer) >= TLX493D_LOG_INTERVAL_MS) {
+            LOG_INF("Sensor: X=%d(%d) Y=%d(%d) Z=%d [%s]", 
+                   x, dx, y, dy, z,
+                   (data->active_x || data->active_y) ? "ACTIVE" : "IDLE");
             data->log_timer = now;
         }
 
-        // Calculate relative movement
-        int16_t dx = x - data->last_x;
-        int16_t dy = y - data->last_y;
-        
-        // Report relative movement if it exceeds threshold
-        if (abs(dx) > 10 || abs(dy) > 10) {
-            input_report_rel(data->dev, INPUT_REL_X, dx / 10, false, K_FOREVER);
-            input_report_rel(data->dev, INPUT_REL_Y, dy / 10, true, K_FOREVER);
-            
-            // Update last values
-            data->last_x = x;
-            data->last_y = y;
-            data->last_z = z;
+        if (dx != 0 || dy != 0) {
+            input_report_rel(data->dev, INPUT_REL_X, dx, false, K_FOREVER);
+            input_report_rel(data->dev, INPUT_REL_Y, dy, true, K_FOREVER);
         }
     }
 
@@ -94,15 +111,36 @@ int tlx493d_set_sleep(const struct device *dev, bool sleep) {
     data->sleep_mode = sleep;
     
     // Set power mode according to sleep state
-    mode = sleep ? TLX493D_POWER_MODE_LOW : TLX493D_POWER_MODE_MCM;
+    mode = sleep ? TLX493D_MODE_LOW_POWER : TLX493D_MODE_MCM_FAST;
     
-    return i2c_reg_write_byte_dt(&config->i2c, TLX493D_MOD1_REG, mode);
+    return i2c_reg_write_byte_dt(&config->i2c, TLX493D_REG_B_MOD1, mode);
+}
+
+static int tlx493d_reset(const struct device *dev) {
+    const struct tlx493d_config *config = dev->config;
+    int ret;
+
+    // Power down mode
+    ret = i2c_reg_write_byte_dt(&config->i2c, TLX493D_REG_B_MOD1, TLX493D_MODE_DISABLE);
+    if (ret < 0) return ret;
+    k_sleep(K_MSEC(TLX493D_RESET_DELAY_MS));
+
+    // Fast mode + MCM configuration
+    uint8_t config_val = TLX493D_CONFIG_FAST;  // Fast mode, temp disabled
+    ret = i2c_reg_write_byte_dt(&config->i2c, TLX493D_REG_CONFIG, config_val);
+    if (ret < 0) return ret;
+
+    // Enable MCM mode
+    ret = i2c_reg_write_byte_dt(&config->i2c, TLX493D_REG_B_MOD1, TLX493D_MODE_MCM_FAST);
+    if (ret < 0) return ret;
+
+    k_sleep(K_MSEC(TLX493D_POWER_UP_DELAY_MS));
+    return 0;
 }
 
 static int tlx493d_init(const struct device *dev) {
     struct tlx493d_data *data = dev->data;
     const struct tlx493d_config *config = dev->config;
-    uint8_t chip_id;
     int ret;
 
     if (!device_is_ready(config->i2c.bus)) {
@@ -110,17 +148,9 @@ static int tlx493d_init(const struct device *dev) {
         return -ENODEV;
     }
 
-    // Read and verify chip ID
-    ret = i2c_reg_read_byte_dt(&config->i2c, TLX493D_WHOAMI_REG, &chip_id);
-    if (ret < 0 || chip_id != TLX493D_CHIP_ID) {
-        LOG_ERR("Failed to verify chip ID");
-        return -EINVAL;
-    }
-
-    // Initialize sensor in Master Controlled Mode
-    ret = i2c_reg_write_byte_dt(&config->i2c, TLX493D_MOD1_REG, TLX493D_POWER_MODE_MCM);
+    // デバイスの初期化
+    ret = tlx493d_reset(dev);
     if (ret < 0) {
-        LOG_ERR("Failed to set MCM mode");
         return ret;
     }
 
