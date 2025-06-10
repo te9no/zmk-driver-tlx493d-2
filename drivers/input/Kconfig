@@ -1,36 +1,14 @@
-# Copyright (c) 2022 The ZMK Contributors
-# SPDX-License-Identifier: MIT
+config TLX493D_POLLING_INTERVAL_MS
+    int "TLX493D Polling Interval (ms)"
+    default 10
+    help
+        Polling interval for the TLX493D sensor in milliseconds.
 
-menuconfig INPUT_TLX493D
-    bool "Infineon TLX493D 3D magnetic sensor"
-    default y
-    depends on I2C
-    depends on INPUT
+config TLX493D_DRIVER
+    bool "TLX493D 3D Magnetic Sensor Driver"
     depends on DT_HAS_INFINEON_TLX493D_ENABLED
     help
-      Enable driver for Infineon TLX493D 3D magnetic sensor.
+        Enable the driver for the Infineon TLX493D 3D magnetic sensor.
 
-if INPUT_TLX493D
 
-config INPUT_TLX493D_INIT_PRIORITY
-    int "TLX493D initialization priority"
-    default INPUT_INIT_PRIORITY
 
-config INPUT_TLX493D_POLLING_INTERVAL_MS
-    int "Polling interval in milliseconds"
-    default 10
-    range 1 1000
-    help
-      Interval between sensor readings in milliseconds.
-
-if ZMK_MOUSE
-
-config ZMK_INPUT_TLX493D_IDLE_SLEEPER
-    bool "Enable TLX493D sleep mode during ZMK idle"
-    default y
-    help
-      Puts the TLX493D into low power mode when ZMK enters idle state.
-
-endif # ZMK_MOUSE
-
-endif # INPUT_TLX493D
