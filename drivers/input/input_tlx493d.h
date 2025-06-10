@@ -46,4 +46,5 @@
 /* Function Declarations */
 int tlx493d_set_sleep(const struct device *dev, bool sleep);
 int tlx493d_calibrate(const struct device *dev);
+int tlx493d_read_sensor_data(const struct device *dev, int16_t *x, int16_t *y, int16_t *z);
 

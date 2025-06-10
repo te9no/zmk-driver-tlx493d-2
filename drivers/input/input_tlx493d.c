@@ -40,7 +40,8 @@ struct tlx493d_config {
     struct i2c_dt_spec i2c;
 };
 
-static int tlx493d_read_sensor_data(const struct device *dev, int16_t *x, int16_t *y, int16_t *z) {
+// Change from static to non-static
+int tlx493d_read_sensor_data(const struct device *dev, int16_t *x, int16_t *y, int16_t *z) {
     const struct tlx493d_config *config = dev->config;
     uint8_t data[6];
     int ret;
@@ -99,7 +100,8 @@ static void log_bar_graph(const char *label, int16_t value) {
 static void tlx493d_work_cb(struct k_work *work) {
     struct tlx493d_data *data = CONTAINER_OF(work, struct tlx493d_data, work.work);
     int16_t x, y, z;
-    
+    LOG_INF("Polling TLX493D sensor...");
+
     if (data->sleep_mode) {
         // Skip reading when in sleep mode
         k_work_reschedule(&data->work, K_MSEC(CONFIG_INPUT_TLX493D_POLLING_INTERVAL_MS));
@@ -148,22 +150,44 @@ static int tlx493d_reset(const struct device *dev) {
     const struct tlx493d_config *config = dev->config;
     int ret;
 
-    // Power down mode
-    ret = i2c_reg_write_byte_dt(&config->i2c, TLX493D_REG_B_MOD1, TLX493D_MODE_DISABLE);
-    if (ret < 0) return ret;
-    k_sleep(K_MSEC(TLX493D_RESET_DELAY_MS));
+    // Add longer initial delay before reset
+    k_sleep(K_MSEC(250));
 
-    // Fast mode + MCM configuration
-    uint8_t config_val = TLX493D_CONFIG_FAST;  // Fast mode, temp disabled
-    ret = i2c_reg_write_byte_dt(&config->i2c, TLX493D_REG_CONFIG, config_val);
-    if (ret < 0) return ret;
+    // Retry logic for reset sequence
+    for (int i = 0; i < 3; i++) {
+        // Power down mode
+        ret = i2c_reg_write_byte_dt(&config->i2c, TLX493D_REG_B_MOD1, TLX493D_MODE_DISABLE);
+        if (ret < 0) {
+            LOG_WRN("Reset attempt %d: Failed to set power down mode: %d", i + 1, ret);
+            k_sleep(K_MSEC(300));
+            continue;
+        }
 
-    // Enable MCM mode
-    ret = i2c_reg_write_byte_dt(&config->i2c, TLX493D_REG_B_MOD1, TLX493D_MODE_MCM_FAST);
-    if (ret < 0) return ret;
+        k_sleep(K_MSEC(TLX493D_RESET_DELAY_MS));
 
-    k_sleep(K_MSEC(TLX493D_POWER_UP_DELAY_MS));
-    return 0;
+        // Fast mode + MCM configuration
+        ret = i2c_reg_write_byte_dt(&config->i2c, TLX493D_REG_CONFIG, TLX493D_CONFIG_FAST);
+        if (ret < 0) {
+            LOG_WRN("Reset attempt %d: Failed to set configuration: %d", i + 1, ret);
+            k_sleep(K_MSEC(300));
+            continue;
+        }
+
+        // // Enable MCM mode
+        // ret = i2c_reg_write_byte_dt(&config->i2c, TLX493D_REG_B_MOD1, TLX493D_MODE_MCM_FAST);
+        // if (ret < 0) {
+        //     LOG_WRN("Reset attempt %d: Failed to set MCM mode: %d", i + 1, ret);
+        //     k_sleep(K_MSEC(300));
+        //     continue;
+        // }
+
+        k_sleep(K_MSEC(TLX493D_POWER_UP_DELAY_MS));
+        LOG_INF("Reset successful on attempt %d", i + 1);
+        return 0;
+    }
+
+    LOG_ERR("Failed to reset sensor after multiple attempts");
+    return -EIO;
 }
 
 int tlx493d_calibrate(const struct device *dev) {
@@ -195,37 +219,69 @@ int tlx493d_calibrate(const struct device *dev) {
 static int tlx493d_init(const struct device *dev) {
     struct tlx493d_data *data = dev->data;
     const struct tlx493d_config *config = dev->config;
+    int retry_count = 5;
     int ret;
 
+    LOF_INF*("Initializing TLX493D sensor...");
     if (!device_is_ready(config->i2c.bus)) {
         LOG_ERR("I2C bus not ready");
         return -ENODEV;
     }
 
-    // デバイスの初期化
-    ret = tlx493d_reset(dev);
+    LOG_INF("Initializing TLX493D sensor at address 0x%02X", config->i2c.addr);
+    
+    // Increased initial delay
+    k_sleep(K_MSEC(250));
+
+    // Verify I2C communication first
+    while (retry_count--) {
+        uint8_t test_byte;
+        ret = i2c_reg_read_byte_dt(&config->i2c, TLX493D_REG_B_MOD1, &test_byte);
+        
+        if (ret == 0) {
+            LOG_INF("Successfully communicated with sensor (reg value: 0x%02X)", test_byte);
+            break;
+        }
+        
+        LOG_WRN("Failed to communicate with sensor (%d), retries left: %d", ret, retry_count);
+        k_sleep(K_MSEC(250));  // Increased delay between retries
+    }
+
     if (ret < 0) {
+        LOG_ERR("Failed to establish communication with sensor after all retries");
         return ret;
     }
 
+    // Initialize rest of the device
     data->dev = dev;
     data->sleep_mode = false;
     data->log_timer = k_uptime_get_32();
     data->calibrated = false;
-    data->movement_active = false;  // 初期状態は非アクティブ
+    data->movement_active = false;
 
-    // センサーのキャリブレーションを実行
-    ret = tlx493d_calibrate(dev);
+    // Reset and configure the sensor with increased delay
+    k_sleep(K_MSEC(300));
+    ret = tlx493d_reset(dev);
     if (ret < 0) {
-        LOG_ERR("Failed to calibrate sensor");
+        LOG_ERR("Failed to reset sensor: %d", ret);
         return ret;
     }
+    LOG_INF("Sensor reset successful");
+    // Add delay after reset
+    k_sleep(K_MSEC(TLX493D_POWER_UP_DELAY_MS));
+
+    // MCMモードを明示的に有効化
+    // ret = i2c_reg_write_byte_dt(&config->i2c, TLX493D_REG_B_MOD1, TLX493D_MODE_MCM_FAST);
+    // if (ret < 0) {
+    //     LOG_ERR("Failed to enable MCM mode: %d", ret);
+    //     return ret;
+    // }
 
     // Initialize and start polling work
     k_work_init_delayable(&data->work, tlx493d_work_cb);
-    k_work_schedule(&data->work, K_MSEC(CONFIG_INPUT_TLX493D_POLLING_INTERVAL_MS));
-
-    return 0;
+    
+    // 初期化直後から即座にポーリングを開始
+    return k_work_schedule(&data->work, K_NO_WAIT);
 }
 
 #if IS_ENABLED(CONFIG_PM_DEVICE)
@@ -233,8 +289,10 @@ static int tlx493d_init(const struct device *dev) {
 static int tlx493d_pm_action(const struct device *dev, enum pm_device_action action) {
     switch (action) {
     case PM_DEVICE_ACTION_SUSPEND:
+        LOG_INF("Suspending TLX493D sensor");
         return tlx493d_set_sleep(dev, true);
     case PM_DEVICE_ACTION_RESUME:
+        LOG_INF("Resuming TLX493D sensor");
         return tlx493d_set_sleep(dev, false);
     default:
         return -ENOTSUP;

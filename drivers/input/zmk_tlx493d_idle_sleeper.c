@@ -21,6 +21,9 @@ static struct tlx493d_device tlx493d_devs[] = {
 static int on_activity_state(const zmk_event_t *eh) {
     struct zmk_activity_state_changed *state_ev = as_zmk_activity_state_changed(eh);
 
+    // Add delay before device access
+    k_sleep(K_MSEC(50));
+
     if (!state_ev) {
         LOG_WRN("No activity state change event");
         return -EINVAL;
@@ -30,14 +33,26 @@ static int on_activity_state(const zmk_event_t *eh) {
     
     for (size_t i = 0; i < ARRAY_SIZE(tlx493d_devs); i++) {
         const struct device *dev = tlx493d_devs[i].dev;
-        if (!device_is_ready(dev)) {
-            LOG_ERR("TLX493D device %d not ready", i);
-            continue;
+        // Add retry logic
+        int retries = 3;
+        while (retries--) {
+            if (!device_is_ready(dev)) {
+                LOG_WRN("TLX493D device %d not ready, retrying...", i);
+                k_sleep(K_MSEC(100));
+                continue;
+            }
+            
+            int ret = tlx493d_set_sleep(dev, sleep);
+            if (ret == 0) {
+                break;
+            }
+            LOG_WRN("Failed to set sleep state for device %d: %d, retries left: %d", 
+                    i, ret, retries);
+            k_sleep(K_MSEC(100));
         }
         
-        int ret = tlx493d_set_sleep(dev, sleep);
-        if (ret) {
-            LOG_ERR("Failed to set sleep state for device %d: %d", i, ret);
+        if (retries < 0) {
+            LOG_ERR("Failed to set sleep state for device %d after all retries", i);
         }
     }
 
