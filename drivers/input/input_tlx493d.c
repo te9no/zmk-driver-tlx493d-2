@@ -167,11 +167,10 @@ static int tlx493d_init(const struct device *dev)
     static const struct tlx493d_config tlx493d_config_##inst = { \
         .i2c = I2C_DT_SPEC_INST_GET(inst), \
     }; \
-    DEVICE_DT_INST_DEFINE(inst, tlx493d_init, NULL, \
+    BEHAVIOR_DT_INST_DEFINE(inst, tlx493d_init, NULL, \
                           &tlx493d_data_##inst, &tlx493d_config_##inst, \
-                          POST_KERNEL, CONFIG_INPUT_INIT_PRIORITY, \
+                          POST_KERNEL, CONFIG_INPUT_TLX493D_INIT_PRIORITY, \
                           NULL); // No API struct for now
 
 DT_INST_FOREACH_STATUS_OKAY(TLX493D_DEFINE)
-
 
