@@ -1,9 +1,12 @@
-/*
- * Copyright (c) 2025 Manus AI
- * SPDX-License-Identifier: Apache-2.0
- */
-
 #define DT_DRV_COMPAT infineon_tlx493d
+
+#include <zephyr/dt-bindings/input/input-event-codes.h>
+#include <zephyr/init.h>
+#include <zephyr/pm/device.h>
+#include <stdlib.h>
+
+#include "input_tlx493d.h"
+
 
 #include <zephyr/device.h>
 #include <zephyr/drivers/i2c.h>
@@ -162,15 +165,33 @@ static int tlx493d_init(const struct device *dev)
     return 0;
 }
 
-#define TLX493D_DEFINE(inst) \
-    static struct tlx493d_data tlx493d_data_##inst; \
-    static const struct tlx493d_config tlx493d_config_##inst = { \
-        .i2c = I2C_DT_SPEC_INST_GET(inst), \
+#if IS_ENABLED(CONFIG_PM_DEVICE)
+static int tlx493d_pm_action(const struct device *dev, enum pm_device_action action) {
+    switch (action) {
+    case PM_DEVICE_ACTION_SUSPEND:
+        LOG_INF("Suspending TLX493D sensor");
+        return tlx493d_set_sleep(dev, true);
+    case PM_DEVICE_ACTION_RESUME:
+        LOG_INF("Resuming TLX493D sensor");
+        return tlx493d_set_sleep(dev, false);
+    default:
+        return -ENOTSUP;
+    }
+}
+#endif // IS_ENABLED(CONFIG_PM_DEVICE)
+
+#define TLX493D_INIT(n) \
+    static struct tlx493d_data tlx493d_data_##n; \
+    static const struct tlx493d_config tlx493d_config_##n = { \
+        .i2c = I2C_DT_SPEC_INST_GET(n), \
     }; \
-    BEHAVIOR_DT_INST_DEFINE(inst, tlx493d_init, NULL, \
-                          &tlx493d_data_##inst, &tlx493d_config_##inst, \
-                          POST_KERNEL, CONFIG_INPUT_TLX493D_INIT_PRIORITY, \
-                          NULL); // No API struct for now
+    PM_DEVICE_DT_INST_DEFINE(n, tlx493d_pm_action); \
+    DEVICE_DT_INST_DEFINE(n, tlx493d_init, \
+                         PM_DEVICE_DT_INST_GET(n), \
+                         &tlx493d_data_##n, \
+                         &tlx493d_config_##n, \
+                         POST_KERNEL, \
+                         1, \
+                         NULL);
 
-DT_INST_FOREACH_STATUS_OKAY(TLX493D_DEFINE)
-
+DT_INST_FOREACH_STATUS_OKAY(TLX493D_INIT)
