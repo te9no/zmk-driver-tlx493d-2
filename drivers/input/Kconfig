@@ -10,7 +10,7 @@ menuconfig INPUT_TLX493D
     help
       Enable driver for Infineon TLX493D 3D magnetic sensor.
 
-if INPUT_TLX493D
+if n
 
 config INPUT_TLX493D_INIT_PRIORITY
     int "TLX493D initialization priority"

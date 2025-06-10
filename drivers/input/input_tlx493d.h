@@ -23,8 +23,6 @@
 #define TLX493D_REG_B_Y        0x01    /* Y magnetic data */
 #define TLX493D_REG_B_Z        0x02    /* Z magnetic data */
 #define TLX493D_REG_TEMP       0x03    /* Temperature data */
-#define TLX493D_REG_BX2        0x04    /* X magnetic data LSBs */
-#define TLX493D_REG_BZ2        0x05    /* Z magnetic data LSBs */
 #define TLX493D_REG_CONFIG     0x10    /* Configuration register */
 #define TLX493D_REG_B_MOD1     0x11    /* Mode register 1 */
 
@@ -42,9 +40,3 @@
 
 /* Default configuration */
 #define TLX493D_DEFAULT_CONFIG    (TLX493D_CONFIG_FAST)  /* Fast mode only */
-
-/* Function Declarations */
-int tlx493d_set_sleep(const struct device *dev, bool sleep);
-int tlx493d_calibrate(const struct device *dev);
-int tlx493d_read_sensor_data(const struct device *dev, int16_t *x, int16_t *y, int16_t *z);
-
