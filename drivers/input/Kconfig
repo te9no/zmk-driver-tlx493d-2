@@ -9,6 +9,3 @@ config TLX493D_DRIVER
     depends on DT_HAS_INFINEON_TLX493D_ENABLED
     help
         Enable the driver for the Infineon TLX493D 3D magnetic sensor.
-
-
-
