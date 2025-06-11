@@ -216,7 +216,6 @@ static int tlx493d_read_sensor_data(const struct device *dev)
         LOG_ERR("Failed to read sensor data (ret %d)", ret);
         return ret;
     }
-    data->z = (int16_t)(((bz1 & 0x0F) << 8) | bz2); // Assuming 12-bit data, adjust as per datasheet
 
     // Convert 12-bit values (MSB + 4 bits from LSB)
     data->x = (int16_t)(((raw_data[0] << 4) | (raw_data[1] >> 4)) << 4) >> 4; // Sign extend
@@ -231,7 +230,6 @@ static void tlx493d_work_handler(struct k_work *work) {
     struct tlx493d_data *data = CONTAINER_OF(dwork, struct tlx493d_data, work);
     const struct device *dev = data->dev;
     int ret;
-    int16_t delta_x, delta_y;
 
     int16_t delta_x, delta_y, delta_z;
 
@@ -247,7 +245,6 @@ static void tlx493d_work_handler(struct k_work *work) {
         if (delta_y != 0) {
             input_report_rel(dev, INPUT_REL_Y, delta_y, true, K_FOREVER);
         }
-        input_sync(dev);
 
         // 2. Z軸移動の計算（ズーム操作）
         delta_z = data->z - data->prev_z;
