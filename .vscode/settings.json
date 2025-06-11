@@ -1,0 +1,8 @@
+{
+    "files.associations": {
+        "*.dtsi": "dts",
+        "*.overlay": "dts",
+        "*.keymap": "dts",
+        "cstdlib": "c"
+    }
+}
