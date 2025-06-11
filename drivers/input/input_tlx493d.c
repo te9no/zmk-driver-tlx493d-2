@@ -62,6 +62,7 @@ struct tlx493d_data {
     struct k_work_delayable work;
     uint8_t factory_settings[3];  // Store bytes 7-9 for write operations
     bool initialized;
+    uint32_t log_counter; // カウンター追加
 };
 
 static int tlx493d_write_reg(const struct device *dev, uint8_t reg_addr, uint8_t val)
@@ -139,6 +140,7 @@ static int tlv493d_configure_sensor(const struct device *dev)
     // Configure MOD2: Enable temperature measurement
     // Preserve factory settings and enable temperature
     mod2_val = data->factory_settings[2] | TLV493D_MOD2_TEMP_EN;
+    k_msleep(100);
     
     ret = tlx493d_write_reg(dev, TLV493D_REG_MOD2, mod2_val);
     if (ret < 0) {
@@ -220,11 +222,13 @@ static int tlx493d_read_sensor_data(const struct device *dev)
     // Convert 12-bit values (MSB + 4 bits from LSB)
     data->x = (int16_t)(((raw_data[0] << 4) | (raw_data[1] >> 4)) << 4) >> 4; // Sign extend
     data->y = (int16_t)(((raw_data[2] << 4) | (raw_data[3] >> 4)) << 4) >> 4; // Sign extend  
-    data->z = (int16_t)(((raw_data[4] << 4) | (raw_data[5] >> 4)) << 4) >> 4; // Sign extend
+    data->z = (int16_t)(((raw_data[2] << 8) | (raw_data[3] >> 4)) << 4) >> 4; // 12-bit value
+    // data->z = (int16_t)((raw_data[4] & 0x0F) << 8 | raw_data[5]); // 12-bit value
 
-    LOG_DBG("Sensor data: X=%d, Y=%d, Z=%d", data->x, data->y, data->z);
+    LOG_INF("Sensor data: X=%d, Y=%d, Z=%d", data->x, data->y, data->z);
     return 0;
 }
+
 static void tlx493d_work_handler(struct k_work *work) {
     struct k_work_delayable *dwork = k_work_delayable_from_work(work);
     struct tlx493d_data *data = CONTAINER_OF(dwork, struct tlx493d_data, work);
@@ -232,12 +236,13 @@ static void tlx493d_work_handler(struct k_work *work) {
     int ret;
 
     int16_t delta_x, delta_y, delta_z;
+    const int16_t Z_THRESHOLD = 100; // Z軸の移動に対する閾値
 
     ret = tlx493d_read_sensor_data(dev);
     if (ret == 0) {
-        // 1. 直線移動の計算 (X, Y)
         delta_x = data->x - data->prev_x;
         delta_y = data->y - data->prev_y;
+        delta_z = data->z - data->prev_z;
 
         if (delta_x != 0) {
             input_report_rel(dev, INPUT_REL_X, delta_x, true, K_FOREVER);
@@ -246,27 +251,29 @@ static void tlx493d_work_handler(struct k_work *work) {
             input_report_rel(dev, INPUT_REL_Y, delta_y, true, K_FOREVER);
         }
 
-        // 2. Z軸移動の計算（ズーム操作）
+        // Z軸の移動に閾値を適用
         delta_z = data->z - data->prev_z;
-        if (delta_z != 0) {
-            // Z軸の差分を縦スクロールとしてレポート
-            input_report_rel(dev, INPUT_REL_WHEEL, delta_z, true, K_FOREVER);
+        if (abs(delta_z) > Z_THRESHOLD) {
+            // 閾値を超えた場合のみスクロールを報告
+            // スクロールの方向性を維持しつつ、より滑らかな動きにする
+            int16_t scroll_value = (delta_z > 0) ? 1 : -1;
+            input_report_rel(dev, INPUT_REL_WHEEL, scroll_value, true, K_FOREVER);
         }
 
-        // 3. 回転の計算 (整数演算)
-        // 外積のZ成分を計算してZ軸周りの回転量とする
-        // 16bit * 16bit は 32bit を超えないため int32_t を使用
-        int32_t rot_z = (int32_t)data->prev_x * data->y - (int32_t)data->prev_y * data->x;
+        // // 3. 回転の計算 (整数演算)
+        // // 外積のZ成分を計算してZ軸周りの回転量とする
+        // // 16bit * 16bit は 32bit を超えないため int32_t を使用
+        // int32_t rot_z = (int32_t)data->prev_x * data->y - (int32_t)data->prev_y * data->x;
 
-        // 感度調整: 計算結果が大きすぎるため、ビットシフトで割る
-        // この数値を大きくすると感度が鈍く、小さくすると敏感になる
-        rot_z = rot_z >> CONFIG_INPUT_TLX493D_ROTATION_SCALER;
+        // // 感度調整: 計算結果が大きすぎるため、ビットシフトで割る
+        // // この数値を大きくすると感度が鈍く、小さくすると敏感になる
+        // rot_z = rot_z >> CONFIG_INPUT_TLX493D_ROTATION_SCALER;
 
-        if (rot_z != 0) {
-            // 回転量を水平スクロールとしてレポート
-            input_report_rel(dev, INPUT_REL_HWHEEL, rot_z, true, K_FOREVER);
-        }
-
+        // if (rot_z != 0) {
+        //     // 回転量を水平スクロールとしてレポート
+        //     input_report_rel(dev, INPUT_REL_HWHEEL, rot_z, true, K_FOREVER);
+        // }
+        LOG_INF("delta_x: %d, delta_y: %d, delta_z: %d", delta_x, delta_y, delta_z);
         // データを次回の計算のために保存
         data->prev_x = data->x;
         data->prev_y = data->y;
@@ -285,6 +292,7 @@ static int tlx493d_init(const struct device *dev)
     data->prev_x = 0;
     data->prev_y = 0;
     data->initialized = false;
+    data->log_counter = 0; // カウンターの初期化
 
     if (!device_is_ready(config->i2c.bus)) {
         LOG_ERR("I2C bus %s not ready", config->i2c.bus->name);

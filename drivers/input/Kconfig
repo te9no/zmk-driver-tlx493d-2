@@ -22,3 +22,12 @@ config INPUT_TLX493D_ROTATION_SCALER
       It is the amount of right bit shift applied to the calculated
       cross product. A larger value results in lower sensitivity.
       Recommended range: 6-14.
+
+config INPUT_TLX493D_Z_THRESHOLD
+    int "Z-axis movement threshold"
+    default 20
+    range 1 100
+    help
+      Threshold for Z-axis movement to trigger scrolling.
+      Higher values require more movement before scrolling starts.
+      Lower values make scrolling more sensitive.
