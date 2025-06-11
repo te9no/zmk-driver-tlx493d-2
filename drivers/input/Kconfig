@@ -23,6 +23,15 @@ config INPUT_TLX493D_POLLING_INTERVAL_MS
     help
       Interval between sensor readings in milliseconds.
 
+config INPUT_TLX493D_ROTATION_SCALER
+    int "Rotation scaler (bit shift value)"
+    default 10
+    help
+      This value controls the sensitivity of the rotation detection.
+      It is the amount of right bit shift applied to the calculated
+      cross product. A larger value results in lower sensitivity.
+      Recommended range: 6-14.
+      
 if ZMK_MOUSE
 
 config ZMK_INPUT_TLX493D_IDLE_SLEEPER

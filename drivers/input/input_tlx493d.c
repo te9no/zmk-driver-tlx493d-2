@@ -58,6 +58,7 @@ struct tlx493d_data {
     int16_t z;
     int16_t prev_x;
     int16_t prev_y;
+    int16_t prev_z;
     struct k_work_delayable work;
     uint8_t factory_settings[3];  // Store bytes 7-9 for write operations
     bool initialized;
@@ -224,42 +225,55 @@ static int tlx493d_read_sensor_data(const struct device *dev)
     LOG_DBG("Sensor data: X=%d, Y=%d, Z=%d", data->x, data->y, data->z);
     return 0;
 }
-
-static void tlx493d_work_handler(struct k_work *work)
-{
+static void tlx493d_work_handler(struct k_work *work) {
     struct k_work_delayable *dwork = k_work_delayable_from_work(work);
     struct tlx493d_data *data = CONTAINER_OF(dwork, struct tlx493d_data, work);
     const struct device *dev = data->dev;
     int ret;
-    int16_t delta_x, delta_y;
+
+    int16_t delta_x, delta_y, delta_z;
 
     ret = tlx493d_read_sensor_data(dev);
     if (ret == 0) {
-        // Calculate delta for mouse movement
+        // 1. 直線移動の計算 (X, Y)
         delta_x = data->x - data->prev_x;
         delta_y = data->y - data->prev_y;
 
-        // Report relative mouse movement if there's any change
-        if (delta_x != 0 || delta_y != 0) {
-            if (delta_x != 0 && delta_y != 0) {
-                // Both X and Y movement - sync on the last event
-                input_report_rel(dev, INPUT_REL_X, delta_x, false, K_FOREVER);
-                input_report_rel(dev, INPUT_REL_Y, delta_y, true, K_FOREVER);
-            } else if (delta_x != 0) {
-                // Only X movement - sync on X
-                input_report_rel(dev, INPUT_REL_X, delta_x, true, K_FOREVER);
-            } else {
-                // Only Y movement - sync on Y
-                input_report_rel(dev, INPUT_REL_Y, delta_y, true, K_FOREVER);
-            }
+        if (delta_x != 0) {
+            input_report_rel(dev, INPUT_REL_X, delta_x, true, K_FOREVER);
+        }
+        if (delta_y != 0) {
+            input_report_rel(dev, INPUT_REL_Y, delta_y, true, K_FOREVER);
         }
 
-        // Update previous values
+        // 2. Z軸移動の計算（ズーム操作）
+        delta_z = data->z - data->prev_z;
+        if (delta_z != 0) {
+            // Z軸の差分を縦スクロールとしてレポート
+            input_report_rel(dev, INPUT_REL_WHEEL, delta_z, true, K_FOREVER);
+        }
+
+        // 3. 回転の計算 (整数演算)
+        // 外積のZ成分を計算してZ軸周りの回転量とする
+        // 16bit * 16bit は 32bit を超えないため int32_t を使用
+        int32_t rot_z = (int32_t)data->prev_x * data->y - (int32_t)data->prev_y * data->x;
+
+        // 感度調整: 計算結果が大きすぎるため、ビットシフトで割る
+        // この数値を大きくすると感度が鈍く、小さくすると敏感になる
+        rot_z = rot_z >> CONFIG_INPUT_TLX493D_ROTATION_SCALER;
+
+        if (rot_z != 0) {
+            // 回転量を水平スクロールとしてレポート
+            input_report_rel(dev, INPUT_REL_HWHEEL, rot_z, true, K_FOREVER);
+        }
+
+        // データを次回の計算のために保存
         data->prev_x = data->x;
         data->prev_y = data->y;
+        data->prev_z = data->z;
     }
 
-    k_work_schedule(&data->work, K_MSEC(10));
+    k_work_schedule(&data->work, K_MSEC(DT_INST_PROP(0, polling_interval_ms)));
 }
 
 static int tlx493d_init(const struct device *dev)
