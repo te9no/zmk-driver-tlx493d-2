@@ -1,6 +1,3 @@
-# Copyright (c) 2022 The ZMK Contributors
-# SPDX-License-Identifier: MIT
-
 menuconfig INPUT_TLX493D
     bool "Infineon TLX493D 3D magnetic sensor"
     default y
@@ -34,12 +31,12 @@ config INPUT_TLX493D_ROTATION_SCALER
       
 if ZMK_MOUSE
 
-config ZMK_INPUT_TLX493D_IDLE_SLEEPER
-    bool "Enable TLX493D sleep mode during ZMK idle"
-    default y
-    help
-      Puts the TLX493D into low power mode when ZMK enters idle state.
+    config ZMK_INPUT_TLX493D_IDLE_SLEEPER
+        bool "Enable TLX493D sleep mode during ZMK idle"
+        default y
+        help
+          Puts the TLX493D into low power mode when ZMK enters idle state.
 
-endif # ZMK_MOUSE
+    endif # ZMK_MOUSE
 
 endif # INPUT_TLX493D
