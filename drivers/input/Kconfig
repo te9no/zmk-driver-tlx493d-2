@@ -31,3 +31,10 @@ config INPUT_TLX493D_Z_THRESHOLD
       Threshold for Z-axis movement to trigger scrolling.
       Higher values require more movement before scrolling starts.
       Lower values make scrolling more sensitive.
+
+config POLLING_INTERVAL_MS
+    int "Polling interval in milliseconds"
+    default 20
+    range 1 100
+    help
+      Interval between sensor readings in milliseconds.
