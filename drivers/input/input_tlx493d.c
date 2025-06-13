@@ -87,13 +87,16 @@ static int tlx493d_write_reg(const struct device *dev, uint8_t reg_addr, uint8_t
 static int tlx493d_read_reg(const struct device *dev, uint8_t reg_addr, uint8_t *val);
 static int tlx493d_read_multiple(const struct device *dev, uint8_t start_addr, uint8_t *buf, uint8_t len);
 static int tlv493d_send_recovery_frame(const struct device *dev);
+static int tlv493d_i2c_bus_recovery(const struct device *dev);
 static int tlv493d_send_reset_command(const struct device *dev);
 static int tlv493d_read_factory_settings(const struct device *dev);
 static int tlv493d_configure_sensor(const struct device *dev);
 static int tlv493d_diagnose(const struct device *dev);
 static int tlv493d_initialize_sensor(const struct device *dev);
+static void generate_bar_graph(int16_t value, char *buffer, size_t buffer_size);
 static int tlx493d_read_sensor_data(const struct device *dev);
 static void tlx493d_calibrate(const struct device *dev);
+static void tlx493d_work_handler(struct k_work *work);
 
 static int tlx493d_write_reg(const struct device *dev, uint8_t reg_addr, uint8_t val)
 {
