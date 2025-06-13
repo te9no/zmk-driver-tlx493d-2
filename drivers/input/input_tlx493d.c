@@ -19,6 +19,7 @@ LOG_MODULE_REGISTER(tlx493d, CONFIG_INPUT_LOG_LEVEL);
 // TLV493D-A1B6 Registers
 #define TLV493D_REG_BX_MSB      0x00
 #define TLV493D_REG_TEMP_LSB    0x07
+#define TLV493D_REG_MAP_SIZE    10  // レジスタマップのサイズ
 
 // Write registers
 #define TLV493D_REG_MOD1        0x01
@@ -57,6 +58,15 @@ LOG_MODULE_REGISTER(tlx493d, CONFIG_INPUT_LOG_LEVEL);
 // Maximum retry attempts for initialization
 #define MAX_INIT_RETRIES 3
 
+// I2C通信タイムアウト (ms)
+#define I2C_TIMEOUT_MS 100
+
+// 初期化ステップ間の待機時間 (ms)
+#define INIT_STEP_DELAY_MS 20
+
+// リセット後の待機時間 (ms)
+#define RESET_DELAY_MS 50
+
 struct tlx493d_config {
     struct i2c_dt_spec i2c;
     bool addr_pin_high;  // ADDR pin level configuration
@@ -80,6 +90,9 @@ struct tlx493d_data {
     bool movement_active_z; // Hysteresis state for Z
     uint8_t error_count;    // Counter for consecutive errors
     uint8_t init_retries;   // Counter for initialization retries
+    uint8_t reg_map[TLV493D_REG_MAP_SIZE]; // レジスタマップのキャッシュ
+    bool data_valid;        // データ有効性フラグ
+    uint8_t parity_errors;  // パリティエラーカウンター
 };
 
 // 関数プロトタイプ宣言
@@ -87,37 +100,101 @@ static int tlx493d_write_reg(const struct device *dev, uint8_t reg_addr, uint8_t
 static int tlx493d_read_reg(const struct device *dev, uint8_t reg_addr, uint8_t *val);
 static int tlx493d_read_multiple(const struct device *dev, uint8_t start_addr, uint8_t *buf, uint8_t len);
 static int tlv493d_send_recovery_frame(const struct device *dev);
-static int tlv493d_i2c_bus_recovery(const struct device *dev);
 static int tlv493d_send_reset_command(const struct device *dev);
+static int tlv493d_i2c_bus_recovery(const struct device *dev);
 static int tlv493d_read_factory_settings(const struct device *dev);
 static int tlv493d_configure_sensor(const struct device *dev);
 static int tlv493d_diagnose(const struct device *dev);
 static int tlv493d_initialize_sensor(const struct device *dev);
-static void generate_bar_graph(int16_t value, char *buffer, size_t buffer_size);
 static int tlx493d_read_sensor_data(const struct device *dev);
 static void tlx493d_calibrate(const struct device *dev);
-static void tlx493d_work_handler(struct k_work *work);
+static bool tlx493d_has_valid_data(const struct device *dev);
+static bool tlx493d_is_functional(const struct device *dev);
+static int tlx493d_update_reg_map(const struct device *dev);
 
+/**
+ * @brief レジスタに値を書き込む
+ *
+ * @param dev デバイス構造体へのポインタ
+ * @param reg_addr レジスタアドレス
+ * @param val 書き込む値
+ * @return 0: 成功、負の値: エラーコード
+ */
 static int tlx493d_write_reg(const struct device *dev, uint8_t reg_addr, uint8_t val)
 {
     const struct tlx493d_config *config = dev->config;
+    struct tlx493d_data *data = dev->data;
     uint8_t buf[2] = {reg_addr, val};
+    int ret;
     
-    return i2c_write_dt(&config->i2c, buf, sizeof(buf));
+    ret = i2c_write_dt(&config->i2c, buf, sizeof(buf));
+    if (ret == 0) {
+        // 書き込みが成功したら、レジスタマップのキャッシュを更新
+        if (reg_addr < TLV493D_REG_MAP_SIZE) {
+            data->reg_map[reg_addr] = val;
+        }
+    }
+    
+    return ret;
 }
 
+/**
+ * @brief レジスタから値を読み取る
+ *
+ * @param dev デバイス構造体へのポインタ
+ * @param reg_addr レジスタアドレス
+ * @param val 読み取った値を格納するポインタ
+ * @return 0: 成功、負の値: エラーコード
+ */
 static int tlx493d_read_reg(const struct device *dev, uint8_t reg_addr, uint8_t *val)
 {
     const struct tlx493d_config *config = dev->config;
-    return i2c_reg_read_byte_dt(&config->i2c, reg_addr, val);
+    struct tlx493d_data *data = dev->data;
+    int ret;
+    
+    ret = i2c_reg_read_byte_dt(&config->i2c, reg_addr, val);
+    if (ret == 0) {
+        // 読み取りが成功したら、レジスタマップのキャッシュを更新
+        if (reg_addr < TLV493D_REG_MAP_SIZE) {
+            data->reg_map[reg_addr] = *val;
+        }
+    }
+    
+    return ret;
 }
 
+/**
+ * @brief 複数のレジスタから連続して値を読み取る
+ *
+ * @param dev デバイス構造体へのポインタ
+ * @param start_addr 開始レジスタアドレス
+ * @param buf 読み取った値を格納するバッファ
+ * @param len 読み取るバイト数
+ * @return 0: 成功、負の値: エラーコード
+ */
 static int tlx493d_read_multiple(const struct device *dev, uint8_t start_addr, uint8_t *buf, uint8_t len)
 {
     const struct tlx493d_config *config = dev->config;
-    return i2c_burst_read_dt(&config->i2c, start_addr, buf, len);
+    struct tlx493d_data *data = dev->data;
+    int ret;
+    
+    ret = i2c_burst_read_dt(&config->i2c, start_addr, buf, len);
+    if (ret == 0) {
+        // 読み取りが成功したら、レジスタマップのキャッシュを更新
+        for (int i = 0; i < len && (start_addr + i) < TLV493D_REG_MAP_SIZE; i++) {
+            data->reg_map[start_addr + i] = buf[i];
+        }
+    }
+    
+    return ret;
 }
 
+/**
+ * @brief リカバリーフレームを送信する
+ *
+ * @param dev デバイス構造体へのポインタ
+ * @return 0: 成功、負の値: エラーコード
+ */
 static int tlv493d_send_recovery_frame(const struct device *dev)
 {
     const struct tlx493d_config *config = dev->config;
@@ -127,6 +204,12 @@ static int tlv493d_send_recovery_frame(const struct device *dev)
     return i2c_write_dt(&config->i2c, &recovery_cmd, 1);
 }
 
+/**
+ * @brief リセットコマンドを送信する
+ *
+ * @param dev デバイス構造体へのポインタ
+ * @return 0: 成功、負の値: エラーコード
+ */
 static int tlv493d_send_reset_command(const struct device *dev)
 {
     const struct tlx493d_config *config = dev->config;
@@ -163,7 +246,7 @@ static int tlv493d_i2c_bus_recovery(const struct device *dev)
     }
     
     // 少し待機
-    k_msleep(20);
+    k_msleep(INIT_STEP_DELAY_MS);
     
     // 2. リカバリーフレーム(0xFF)を送信
     ret = tlv493d_send_recovery_frame(dev);
@@ -173,12 +256,18 @@ static int tlv493d_i2c_bus_recovery(const struct device *dev)
     }
     
     // 少し待機
-    k_msleep(20);
+    k_msleep(INIT_STEP_DELAY_MS);
     
     LOG_INF("I2C bus recovery completed");
     return 0;
 }
 
+/**
+ * @brief 工場設定を読み取る
+ *
+ * @param dev デバイス構造体へのポインタ
+ * @return 0: 成功、負の値: エラーコード
+ */
 static int tlv493d_read_factory_settings(const struct device *dev)
 {
     struct tlx493d_data *data = dev->data;
@@ -197,6 +286,12 @@ static int tlv493d_read_factory_settings(const struct device *dev)
     return 0;
 }
 
+/**
+ * @brief センサーを設定する
+ *
+ * @param dev デバイス構造体へのポインタ
+ * @return 0: 成功、負の値: エラーコード
+ */
 static int tlv493d_configure_sensor(const struct device *dev)
 {
     struct tlx493d_data *data = dev->data;
@@ -214,7 +309,7 @@ static int tlv493d_configure_sensor(const struct device *dev)
     }
     
     // 書き込み後の待機時間を延長
-    k_msleep(20);
+    k_msleep(INIT_STEP_DELAY_MS);
     
     // Configure MOD2: Enable temperature measurement
     // Preserve factory settings and enable temperature
@@ -227,7 +322,7 @@ static int tlv493d_configure_sensor(const struct device *dev)
     }
     
     // 書き込み後の待機時間を追加
-    k_msleep(20);
+    k_msleep(INIT_STEP_DELAY_MS);
     
     LOG_INF("Sensor configured: MOD1=0x%02X, MOD2=0x%02X", mod1_val, mod2_val);
     return 0;
@@ -243,7 +338,7 @@ static int tlv493d_configure_sensor(const struct device *dev)
  */
 static int tlv493d_diagnose(const struct device *dev)
 {
-    uint8_t reg_values[10];
+    uint8_t reg_values[TLV493D_REG_MAP_SIZE];
     int ret;
     
     LOG_INF("Performing TLV493D sensor diagnostics");
@@ -278,6 +373,12 @@ static int tlv493d_diagnose(const struct device *dev)
     return 0;
 }
 
+/**
+ * @brief センサーを初期化する
+ *
+ * @param dev デバイス構造体へのポインタ
+ * @return 0: 成功、負の値: エラーコード
+ */
 static int tlv493d_initialize_sensor(const struct device *dev)
 {
     struct tlx493d_data *data = dev->data;
@@ -300,31 +401,31 @@ static int tlv493d_initialize_sensor(const struct device *dev)
         if (ret < 0) {
             LOG_WRN("Recovery frame failed, retry %d (ret %d)", retry_count, ret);
             retry_count++;
-            k_msleep(10 * (retry_count + 1)); // 遅延を増やしながらリトライ
+            k_msleep(INIT_STEP_DELAY_MS * (retry_count + 1)); // 遅延を増やしながらリトライ
             continue;
         }
         
         // 待機時間を延長
-        k_msleep(20);
+        k_msleep(INIT_STEP_DELAY_MS);
         
         // Step 2: リセットコマンド送信
         ret = tlv493d_send_reset_command(dev);
         if (ret < 0) {
             LOG_WRN("Reset command failed, retry %d (ret %d)", retry_count, ret);
             retry_count++;
-            k_msleep(10 * (retry_count + 1));
+            k_msleep(INIT_STEP_DELAY_MS * (retry_count + 1));
             continue;
         }
         
         // リセット後の待機時間を延長
-        k_msleep(50);
+        k_msleep(RESET_DELAY_MS);
         
         // Step 3: I2C通信テスト
         ret = tlx493d_read_reg(dev, TLV493D_REG_BX_MSB, &test_read);
         if (ret < 0) {
             LOG_WRN("I2C communication test failed, retry %d (ret %d)", retry_count, ret);
             retry_count++;
-            k_msleep(10 * (retry_count + 1));
+            k_msleep(INIT_STEP_DELAY_MS * (retry_count + 1));
             continue;
         }
         
@@ -333,29 +434,33 @@ static int tlv493d_initialize_sensor(const struct device *dev)
         if (ret < 0) {
             LOG_WRN("Failed to read factory settings, retry %d (ret %d)", retry_count, ret);
             retry_count++;
-            k_msleep(10 * (retry_count + 1));
+            k_msleep(INIT_STEP_DELAY_MS * (retry_count + 1));
             continue;
         }
         
         // 待機時間を追加
-        k_msleep(20);
+        k_msleep(INIT_STEP_DELAY_MS);
         
         // Step 5: センサー設定
         ret = tlv493d_configure_sensor(dev);
         if (ret < 0) {
             LOG_WRN("Failed to configure sensor, retry %d (ret %d)", retry_count, ret);
             retry_count++;
-            k_msleep(10 * (retry_count + 1));
+            k_msleep(INIT_STEP_DELAY_MS * (retry_count + 1));
             continue;
         }
         
         // 全ステップ成功
         data->initialized = true;
         data->init_retries = 0; // リトライカウンターをリセット
+        data->data_valid = false; // 初期化直後はデータ無効
         LOG_INF("TLV493D sensor initialization completed successfully");
         
         // 診断を実行
         tlv493d_diagnose(dev);
+        
+        // レジスタマップを更新
+        tlx493d_update_reg_map(dev);
         
         return 0;
     }
@@ -366,7 +471,85 @@ static int tlv493d_initialize_sensor(const struct device *dev)
     return -EIO;
 }
 
-// Helper function to generate a bar graph string
+/**
+ * @brief レジスタマップを更新する
+ *
+ * @param dev デバイス構造体へのポインタ
+ * @return 0: 成功、負の値: エラーコード
+ */
+static int tlx493d_update_reg_map(const struct device *dev)
+{
+    struct tlx493d_data *data = dev->data;
+    int ret;
+    
+    // 全レジスタを読み取り
+    ret = tlx493d_read_multiple(dev, 0, data->reg_map, TLV493D_REG_MAP_SIZE);
+    if (ret < 0) {
+        LOG_ERR("Failed to update register map (ret %d)", ret);
+        return ret;
+    }
+    
+    return 0;
+}
+
+/**
+ * @brief センサーデータが有効かどうかを確認する
+ *
+ * @param dev デバイス構造体へのポインタ
+ * @return true: データ有効、false: データ無効
+ */
+static bool tlx493d_has_valid_data(const struct device *dev)
+{
+    struct tlx493d_data *data = dev->data;
+    
+    // 初期化されていない場合は無効
+    if (!data->initialized) {
+        return false;
+    }
+    
+    // データ有効フラグをチェック
+    return data->data_valid;
+}
+
+/**
+ * @brief センサーが機能しているかどうかを確認する
+ *
+ * @param dev デバイス構造体へのポインタ
+ * @return true: 機能している、false: 機能していない
+ */
+static bool tlx493d_is_functional(const struct device *dev)
+{
+    struct tlx493d_data *data = dev->data;
+    uint8_t test_val;
+    int ret;
+    
+    // 初期化されていない場合は機能していない
+    if (!data->initialized) {
+        return false;
+    }
+    
+    // 通信テスト
+    ret = tlx493d_read_reg(dev, TLV493D_REG_BX_MSB, &test_val);
+    if (ret < 0) {
+        return false;
+    }
+    
+    // MOD1レジスタの設定を確認
+    ret = tlx493d_read_reg(dev, TLV493D_REG_MOD1, &test_val);
+    if (ret < 0 || (test_val & TLV493D_MOD1_FASTMODE) == 0) {
+        return false;
+    }
+    
+    return true;
+}
+
+/**
+ * @brief バーグラフ文字列を生成する
+ *
+ * @param value センサー値
+ * @param buffer 文字列を格納するバッファ
+ * @param buffer_size バッファサイズ
+ */
 static void generate_bar_graph(int16_t value, char *buffer, size_t buffer_size)
 {
     int normalized_value = (int)(((float)value - SENSOR_VALUE_MIN) / (SENSOR_VALUE_MAX - SENSOR_VALUE_MIN) * BAR_GRAPH_WIDTH);
@@ -405,6 +588,12 @@ static void generate_bar_graph(int16_t value, char *buffer, size_t buffer_size)
     }
 }
 
+/**
+ * @brief センサーデータを読み取る
+ *
+ * @param dev デバイス構造体へのポインタ
+ * @return 0: 成功、負の値: エラーコード
+ */
 static int tlx493d_read_sensor_data(const struct device *dev)
 {
     struct tlx493d_data *data = dev->data;
@@ -423,6 +612,7 @@ static int tlx493d_read_sensor_data(const struct device *dev)
     ret = tlx493d_read_multiple(dev, TLV493D_REG_BX_MSB, raw_data, 6);
     if (ret < 0) {
         LOG_ERR("Failed to read sensor data (ret %d)", ret);
+        data->data_valid = false;
         return ret;
     }
 
@@ -432,6 +622,9 @@ static int tlx493d_read_sensor_data(const struct device *dev)
     // data->z = (int16_t)(((raw_data[2] << 4) | (raw_data[5] & 0x0F)) << 4) >> 4;
     data->y = (int16_t)(((raw_data[2] << 4) | (raw_data[5] & 0x0F)) << 4) >> 4;
     data->z = (int16_t)(((raw_data[1] << 4) | (raw_data[4] & 0x0F)) << 4) >> 4;
+    
+    // データ有効フラグを設定
+    data->data_valid = true;
     
     generate_bar_graph(data->x, x_bar, sizeof(x_bar));
     generate_bar_graph(data->y, y_bar, sizeof(y_bar));
@@ -444,6 +637,11 @@ static int tlx493d_read_sensor_data(const struct device *dev)
     return 0;
 }
 
+/**
+ * @brief センサーをキャリブレーションする
+ *
+ * @param dev デバイス構造体へのポインタ
+ */
 static void tlx493d_calibrate(const struct device *dev) {
     struct tlx493d_data *data = dev->data;
     int32_t sum_x = 0, sum_y = 0, sum_z = 0;
@@ -472,6 +670,11 @@ static void tlx493d_calibrate(const struct device *dev) {
             data->origin_x, data->origin_y, data->origin_z);
 }
 
+/**
+ * @brief ワークハンドラー
+ *
+ * @param work ワーク構造体へのポインタ
+ */
 static void tlx493d_work_handler(struct k_work *work) {
     struct k_work_delayable *dwork = k_work_delayable_from_work(work);
     struct tlx493d_data *data = CONTAINER_OF(dwork, struct tlx493d_data, work);
@@ -495,6 +698,14 @@ static void tlx493d_work_handler(struct k_work *work) {
             k_work_schedule(&data->work, K_MSEC(DT_INST_PROP(0, polling_interval_ms)));
             return;
         }
+    }
+
+    // センサーが機能しているか確認
+    if (!tlx493d_is_functional(dev)) {
+        LOG_WRN("Sensor is not functional, attempting to reinitialize");
+        data->initialized = false;
+        k_work_schedule(&data->work, K_MSEC(DT_INST_PROP(0, polling_interval_ms)));
+        return;
     }
 
     // キャリブレーションが必要な場合
@@ -583,6 +794,12 @@ static void tlx493d_work_handler(struct k_work *work) {
     k_work_schedule(&data->work, K_MSEC(DT_INST_PROP(0, polling_interval_ms)));
 }
 
+/**
+ * @brief デバイス初期化関数
+ *
+ * @param dev デバイス構造体へのポインタ
+ * @return 0: 成功、負の値: エラーコード
+ */
 static int tlx493d_init(const struct device *dev)
 {
     struct tlx493d_data *data = dev->data;
@@ -597,6 +814,11 @@ static int tlx493d_init(const struct device *dev)
     data->movement_active_z = false;
     data->error_count = 0;
     data->init_retries = 0;
+    data->data_valid = false;
+    data->parity_errors = 0;
+    
+    // レジスタマップを初期化
+    memset(data->reg_map, 0, TLV493D_REG_MAP_SIZE);
 
     if (!device_is_ready(config->i2c.bus)) {
         LOG_ERR("I2C bus %s not ready", config->i2c.bus->name);
