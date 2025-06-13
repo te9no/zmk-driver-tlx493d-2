@@ -82,6 +82,19 @@ struct tlx493d_data {
     uint8_t init_retries;   // Counter for initialization retries
 };
 
+// 関数プロトタイプ宣言
+static int tlx493d_write_reg(const struct device *dev, uint8_t reg_addr, uint8_t val);
+static int tlx493d_read_reg(const struct device *dev, uint8_t reg_addr, uint8_t *val);
+static int tlx493d_read_multiple(const struct device *dev, uint8_t start_addr, uint8_t *buf, uint8_t len);
+static int tlv493d_send_recovery_frame(const struct device *dev);
+static int tlv493d_send_reset_command(const struct device *dev);
+static int tlv493d_read_factory_settings(const struct device *dev);
+static int tlv493d_configure_sensor(const struct device *dev);
+static int tlv493d_diagnose(const struct device *dev);
+static int tlv493d_initialize_sensor(const struct device *dev);
+static int tlx493d_read_sensor_data(const struct device *dev);
+static void tlx493d_calibrate(const struct device *dev);
+
 static int tlx493d_write_reg(const struct device *dev, uint8_t reg_addr, uint8_t val)
 {
     const struct tlx493d_config *config = dev->config;
@@ -100,6 +113,24 @@ static int tlx493d_read_multiple(const struct device *dev, uint8_t start_addr, u
 {
     const struct tlx493d_config *config = dev->config;
     return i2c_burst_read_dt(&config->i2c, start_addr, buf, len);
+}
+
+static int tlv493d_send_recovery_frame(const struct device *dev)
+{
+    const struct tlx493d_config *config = dev->config;
+    uint8_t recovery_cmd = TLV493D_RECOVERY_CMD;
+    
+    LOG_DBG("Sending recovery frame");
+    return i2c_write_dt(&config->i2c, &recovery_cmd, 1);
+}
+
+static int tlv493d_send_reset_command(const struct device *dev)
+{
+    const struct tlx493d_config *config = dev->config;
+    uint8_t reset_cmd = TLV493D_RESET_CMD;
+    
+    LOG_DBG("Sending reset command");
+    return i2c_write_dt(&config->i2c, &reset_cmd, 1);
 }
 
 /**
@@ -143,24 +174,6 @@ static int tlv493d_i2c_bus_recovery(const struct device *dev)
     
     LOG_INF("I2C bus recovery completed");
     return 0;
-}
-
-static int tlv493d_send_recovery_frame(const struct device *dev)
-{
-    const struct tlx493d_config *config = dev->config;
-    uint8_t recovery_cmd = TLV493D_RECOVERY_CMD;
-    
-    LOG_DBG("Sending recovery frame");
-    return i2c_write_dt(&config->i2c, &recovery_cmd, 1);
-}
-
-static int tlv493d_send_reset_command(const struct device *dev)
-{
-    const struct tlx493d_config *config = dev->config;
-    uint8_t reset_cmd = TLV493D_RESET_CMD;
-    
-    LOG_DBG("Sending reset command");
-    return i2c_write_dt(&config->i2c, &reset_cmd, 1);
 }
 
 static int tlv493d_read_factory_settings(const struct device *dev)
