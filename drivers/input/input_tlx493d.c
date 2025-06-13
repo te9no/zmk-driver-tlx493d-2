@@ -16,23 +16,9 @@
 
 LOG_MODULE_REGISTER(tlx493d, CONFIG_INPUT_LOG_LEVEL);
 
-// TLV493D-A1B6 I2C Addresses (based on ADDR pin level)
-#define TLV493D_ADDR_LOW_READ   0xBD
-#define TLV493D_ADDR_LOW_WRITE  0xBC
-#define TLV493D_ADDR_HIGH_READ  0x3F
-#define TLV493D_ADDR_HIGH_WRITE 0x3E
-
 // TLV493D-A1B6 Registers
 #define TLV493D_REG_BX_MSB      0x00
-#define TLV493D_REG_BX_LSB      0x01
-#define TLV493D_REG_BY_MSB      0x02
-#define TLV493D_REG_BY_LSB      0x03
-#define TLV493D_REG_BZ_MSB      0x04
-#define TLV493D_REG_BZ_LSB      0x05
-#define TLV493D_REG_TEMP_MSB    0x06
 #define TLV493D_REG_TEMP_LSB    0x07
-#define TLV493D_REG_FRM         0x08
-#define TLV493D_REG_CH          0x09
 
 // Write registers
 #define TLV493D_REG_MOD1        0x01
@@ -40,7 +26,6 @@ LOG_MODULE_REGISTER(tlx493d, CONFIG_INPUT_LOG_LEVEL);
 
 // MOD1 register bits
 #define TLV493D_MOD1_FASTMODE   BIT(1)
-#define TLV493D_MOD1_LPMODE     BIT(0)
 
 // MOD2 register bits  
 #define TLV493D_MOD2_TEMP_EN    BIT(0)
@@ -55,10 +40,10 @@ LOG_MODULE_REGISTER(tlx493d, CONFIG_INPUT_LOG_LEVEL);
 #define SENSOR_VALUE_MAX 2047
 
 // Deadzone for X/Y movement to prevent spurious input
-#define XY_DEADZONE 50 // Adjust as needed
+#define XY_DEADZONE 20 // Adjust as needed
 
 // Deadzone for Z movement to prevent spurious input
-#define Z_DEADZONE 50 // Adjust as needed
+#define Z_DEADZONE 20 // Adjust as needed
 
 // Hysteresis for movement detection
 #define HYSTERESIS_THRESHOLD 20 // Adjust as needed
@@ -287,9 +272,11 @@ static int tlx493d_read_sensor_data(const struct device *dev)
 
     // Convert 12-bit values (MSB + 4 bits from LSB)
     data->x = (int16_t)(((raw_data[0] << 4) | (raw_data[4] >> 4)) << 4) >> 4;
-    data->y = (int16_t)(((raw_data[1] << 4) | (raw_data[4] & 0x0F)) << 4) >> 4;
-    data->z = (int16_t)(((raw_data[2] << 4) | (raw_data[5] & 0x0F)) << 4) >> 4;
-
+    // data->y = (int16_t)(((raw_data[1] << 4) | (raw_data[4] & 0x0F)) << 4) >> 4;
+    // data->z = (int16_t)(((raw_data[2] << 4) | (raw_data[5] & 0x0F)) << 4) >> 4;
+    data->y = (int16_t)(((raw_data[2] << 4) | (raw_data[5] & 0x0F)) << 4) >> 4;
+    data->z = (int16_t)(((raw_data[1] << 4) | (raw_data[4] & 0x0F)) << 4) >> 4;
+    
     generate_bar_graph(data->x, x_bar, sizeof(x_bar));
     generate_bar_graph(data->y, y_bar, sizeof(y_bar));
     generate_bar_graph(data->z, z_bar, sizeof(z_bar));
