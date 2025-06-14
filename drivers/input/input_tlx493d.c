@@ -37,14 +37,14 @@ LOG_MODULE_REGISTER(tlx493d, CONFIG_INPUT_LOG_LEVEL);
 
 // Bar graph settings
 #define BAR_GRAPH_WIDTH 40
-#define SENSOR_VALUE_MIN -2048
-#define SENSOR_VALUE_MAX 2047
+#define SENSOR_VALUE_MIN -100
+#define SENSOR_VALUE_MAX 100
 
 // Deadzone for X/Y movement to prevent spurious input
-#define XY_DEADZONE 20 // Adjust as needed
+#define XY_DEADZONE 3 // Adjust as needed
 
 // Deadzone for Z movement to prevent spurious input
-#define Z_DEADZONE 20 // Adjust as needed
+#define Z_DEADZONE 5 // Adjust as needed
 
 // Hysteresis for movement detection
 #define HYSTERESIS_THRESHOLD 20 // Adjust as needed
@@ -714,8 +714,8 @@ static int tlx493d_read_sensor_data(const struct device *dev)
     data->x = (int16_t)(((raw_data[0] << 4) | (raw_data[4] >> 4)) << 4) >> 4;
     // data->y = (int16_t)(((raw_data[1] << 4) | (raw_data[4] & 0x0F)) << 4) >> 4;
     // data->z = (int16_t)(((raw_data[2] << 4) | (raw_data[5] & 0x0F)) << 4) >> 4;
-    data->y = (int16_t)(((raw_data[2] << 4) | (raw_data[5] & 0x0F)) << 4) >> 4;
-    data->z = (int16_t)(((raw_data[1] << 4) | (raw_data[4] & 0x0F)) << 4) >> 4;
+    data->y = (int16_t)(((raw_data[1] << 4) | (raw_data[4] & 0x0F)) << 4) >> 4;
+    data->z = (int16_t)(((raw_data[2] << 4) | (raw_data[5] & 0x0F)) << 4) >> 4;
     
     // データ有効フラグを設定
     data->data_valid = true;
