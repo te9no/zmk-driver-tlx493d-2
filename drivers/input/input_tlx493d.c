@@ -68,7 +68,7 @@ LOG_MODULE_REGISTER(tlx493d, CONFIG_INPUT_LOG_LEVEL);
 #define RESET_DELAY_MS 100  // 50msから100msに増加
 
 // 自動キャリブレーションのための無移動時間閾値 (ms)
-#define AUTO_RECALIBRATION_TIMEOUT_MS 30000  // 30秒
+#define AUTO_RECALIBRATION_TIMEOUT_MS 3000  // 30秒
 
 // I2Cバスリカバリーの最大試行回数
 #define MAX_BUS_RECOVERY_ATTEMPTS 5
@@ -296,53 +296,59 @@ static int tlv493d_i2c_bus_recovery(const struct device *dev)
     struct tlx493d_data *data = dev->data;
     int ret;
     
-    // バスリカバリー試行回数をインクリメント
     data->bus_recovery_attempts++;
-    
-    LOG_INF("Performing enhanced I2C bus recovery (attempt %d/%d)", 
+    LOG_INF("Performing I2C bus recovery (attempt %d/%d)", 
             data->bus_recovery_attempts, MAX_BUS_RECOVERY_ATTEMPTS);
-    
-    // 1. スタート・ストップコンディションを送信
-    // 空のメッセージを送信することでこれを実現
+
+    // ZephyrのI2CバスリカバリーAPIがあれば利用する
+    // 例: if (i2c_recover_bus(&config->i2c) == 0) {
+    //         LOG_INF("Zephyr I2C bus recovery successful");
+    //         return 0;
+    //    }
+    //    LOG_WRN("Zephyr I2C bus recovery failed, attempting manual recovery");
+
+    // 1. I2Cバスをリセットするためのシーケンス
+    //    空のメッセージを送信することで、バスの状態をリフレッシュする
     uint8_t dummy = 0;
-    ret = i2c_write_dt(&config->i2c, &dummy, 0);
+    ret = i2c_write_dt(&config->i2c, &dummy, 0); // ストップコンディションを生成
     if (ret < 0) {
-        LOG_WRN("Failed to send stop condition (ret %d)", ret);
-        // エラーを返さず続行
+        LOG_WRN("I2C bus recovery: Failed to send stop condition (ret %d)", ret);
     }
-    
-    // 2. 長めの待機時間を追加
-    k_msleep(50);  // 50msの待機時間
-    
-    // 3. リカバリーフレーム(0xFF)を送信
-    ret = tlv493d_send_recovery_frame(dev);
+    k_msleep(50); // 十分な待機時間
+
+    // 2. リカバリーフレーム(0xFF)を複数回送信し、センサーをリセット状態に誘導
+    for (int i = 0; i < 3; i++) { // 複数回送信を試みる
+        ret = tlv493d_send_recovery_frame(dev);
+        if (ret < 0) {
+            LOG_WRN("I2C bus recovery: Recovery frame failed (attempt %d, ret %d)", i + 1, ret);
+        }
+        k_msleep(20); // 各送信間の短い待機
+    }
+    k_msleep(50); // 追加の待機時間
+
+    // 3. リセットコマンド(0x00)を送信
+    ret = tlv493d_send_reset_command(dev);
     if (ret < 0) {
-        LOG_WRN("Recovery frame failed (ret %d)", ret);
-        // エラーを返さず続行
+        LOG_WRN("I2C bus recovery: Reset command failed (ret %d)", ret);
     }
-    
-    // 4. より長い待機時間
-    k_msleep(50);
-    
-    // 5. もう一度スタート・ストップコンディションを送信
-    ret = i2c_write_dt(&config->i2c, &dummy, 0);
-    if (ret < 0) {
-        LOG_WRN("Failed to send second stop condition (ret %d)", ret);
-        // エラーを返さず続行
+    k_msleep(RESET_DELAY_MS); // リセット後の待機時間を確保
+
+    // 4. 最終的なバスの状態確認（簡単な読み取りテスト）
+    uint8_t test_read;
+    ret = tlx493d_read_reg(dev, TLV493D_REG_BX_MSB, &test_read);
+    if (ret == 0) {
+        LOG_INF("I2C bus recovery completed successfully");
+        data->bus_recovery_attempts = 0; // 成功したらカウンターをリセット
+        return 0;
+    } else {
+        LOG_WRN("I2C bus recovery: Post-recovery read test failed (ret %d)", ret);
+        if (data->bus_recovery_attempts >= MAX_BUS_RECOVERY_ATTEMPTS) {
+            LOG_ERR("I2C bus recovery: Maximum attempts reached, bus may be unrecoverable without hardware reset.");
+            data->bus_recovery_attempts = 0; // カウンターをリセット
+            return -EIO; // 最終的に失敗
+        }
+        return ret; // リカバリー失敗
     }
-    
-    // 6. 最終待機
-    k_msleep(50);
-    
-    LOG_INF("Enhanced I2C bus recovery completed");
-    
-    // 最大試行回数を超えた場合、カウンターをリセット
-    if (data->bus_recovery_attempts >= MAX_BUS_RECOVERY_ATTEMPTS) {
-        LOG_WRN("Maximum bus recovery attempts reached, resetting counter");
-        data->bus_recovery_attempts = 0;
-    }
-    
-    return 0;
 }
 
 /**
@@ -470,72 +476,58 @@ static int tlv493d_initialize_sensor(const struct device *dev)
     int ret;
     uint8_t test_read;
     int retry_count = 0;
-    const int max_retries = MAX_INIT_RETRIES;
+    const int max_init_attempts = MAX_INIT_RETRIES; // 最大初期化試行回数
     
     LOG_INF("Starting TLV493D sensor initialization sequence");
     
-    // I2Cバスリカバリーを最初に実行
+    // 初期化前にI2Cバスリカバリーを試みる
     ret = tlv493d_i2c_bus_recovery(dev);
     if (ret < 0) {
-        LOG_WRN("I2C bus recovery failed, continuing (ret %d)", ret);
+        LOG_WRN("Initial I2C bus recovery failed (ret %d), proceeding with initialization attempts.", ret);
+        // バスリカバリーが失敗しても、初期化自体は試行する
     }
     
-    // 初期化前に長めの待機時間を追加
-    k_msleep(100);
+    k_msleep(100); // 初期化前の十分な待機
     
-    while (retry_count < max_retries) {
+    while (retry_count < max_init_attempts) {
+        LOG_DBG("Initialization attempt %d/%d", retry_count + 1, max_init_attempts);
+
         // Step 1: リカバリーフレーム送信
         ret = tlv493d_send_recovery_frame(dev);
         if (ret < 0) {
-            LOG_WRN("Recovery frame failed, retry %d (ret %d)", retry_count, ret);
-            retry_count++;
-            k_msleep(INIT_STEP_DELAY_MS * (retry_count + 1)); // 遅延を増やしながらリトライ
-            continue;
+            LOG_WRN("Recovery frame failed during init (attempt %d, ret %d)", retry_count + 1, ret);
+            goto next_attempt; // 次の試行へ
         }
-        
-        // 待機時間を延長
-        k_msleep(INIT_STEP_DELAY_MS);
+        k_msleep(INIT_STEP_DELAY_MS); // 待機時間を延長
         
         // Step 2: リセットコマンド送信
         ret = tlv493d_send_reset_command(dev);
         if (ret < 0) {
-            LOG_WRN("Reset command failed, retry %d (ret %d)", retry_count, ret);
-            retry_count++;
-            k_msleep(INIT_STEP_DELAY_MS * (retry_count + 1));
-            continue;
+            LOG_WRN("Reset command failed during init (attempt %d, ret %d)", retry_count + 1, ret);
+            goto next_attempt; // 次の試行へ
         }
-        
-        // リセット後の待機時間を延長
-        k_msleep(RESET_DELAY_MS);
+        k_msleep(RESET_DELAY_MS); // リセット後の待機時間を延長
         
         // Step 3: I2C通信テスト
         ret = tlx493d_read_reg(dev, TLV493D_REG_BX_MSB, &test_read);
         if (ret < 0) {
-            LOG_WRN("I2C communication test failed, retry %d (ret %d)", retry_count, ret);
-            retry_count++;
-            k_msleep(INIT_STEP_DELAY_MS * (retry_count + 1));
-            continue;
+            LOG_WRN("I2C communication test failed during init (attempt %d, ret %d)", retry_count + 1, ret);
+            goto next_attempt; // 次の試行へ
         }
         
         // Step 4: 工場設定の読み取り
         ret = tlv493d_read_factory_settings(dev);
         if (ret < 0) {
-            LOG_WRN("Failed to read factory settings, retry %d (ret %d)", retry_count, ret);
-            retry_count++;
-            k_msleep(INIT_STEP_DELAY_MS * (retry_count + 1));
-            continue;
+            LOG_WRN("Failed to read factory settings during init (attempt %d, ret %d)", retry_count + 1, ret);
+            goto next_attempt; // 次の試行へ
         }
-        
-        // 待機時間を追加
-        k_msleep(INIT_STEP_DELAY_MS);
+        k_msleep(INIT_STEP_DELAY_MS); // 待機時間を追加
         
         // Step 5: センサー設定
         ret = tlv493d_configure_sensor(dev);
         if (ret < 0) {
-            LOG_WRN("Failed to configure sensor, retry %d (ret %d)", retry_count, ret);
-            retry_count++;
-            k_msleep(INIT_STEP_DELAY_MS * (retry_count + 1));
-            continue;
+            LOG_WRN("Failed to configure sensor during init (attempt %d, ret %d)", retry_count + 1, ret);
+            goto next_attempt; // 次の試行へ
         }
         
         // 全ステップ成功
@@ -544,17 +536,19 @@ static int tlv493d_initialize_sensor(const struct device *dev)
         data->data_valid = false; // 初期化直後はデータ無効
         LOG_INF("TLV493D sensor initialization completed successfully");
         
-        // 診断を実行
-        tlv493d_diagnose(dev);
+        tlv493d_diagnose(dev); // 診断を実行
+        tlx493d_update_reg_map(dev); // レジスタマップを更新
         
-        // レジスタマップを更新
-        tlx493d_update_reg_map(dev);
-        
-        return 0;
+        return 0; // 成功
+
+    next_attempt:
+        retry_count++;
+        // 試行間の遅延を指数関数的に増やす（例: 50ms, 100ms, 200ms...）
+        k_msleep(INIT_STEP_DELAY_MS * (1 << retry_count)); 
     }
     
     // 最大リトライ回数を超えた場合
-    LOG_ERR("TLV493D sensor initialization failed after %d retries", max_retries);
+    LOG_ERR("TLV493D sensor initialization failed after %d attempts", max_init_attempts);
     data->init_retries++; // 初期化失敗回数をカウント
     return -EIO;
 }
@@ -809,7 +803,7 @@ static void tlx493d_work_handler(struct k_work *work) {
             // 初期化リトライ回数が多すぎる場合、I2Cバスリカバリーを実行
             if (data->init_retries > MAX_INIT_RETRIES * 2) {
                 LOG_WRN("Too many initialization failures, performing I2C bus recovery");
-                tlv493d_i2c_bus_recovery(dev);
+                // tlv493d_i2c_bus_recovery(dev);
                 data->init_retries = 0;
             }
             
@@ -819,13 +813,13 @@ static void tlx493d_work_handler(struct k_work *work) {
         }
     }
 
-    // センサーが機能しているか確認
-    if (!tlx493d_is_functional(dev)) {
-        LOG_WRN("Sensor is not functional, attempting to reinitialize");
-        data->initialized = false;
-        k_work_schedule(&data->work, K_MSEC(DT_INST_PROP(0, polling_interval_ms)));
-        return;
-    }
+    // // センサーが機能しているか確認
+    // if (!tlx493d_is_functional(dev)) {
+    //     LOG_WRN("Sensor is not functional, attempting to reinitialize");
+    //     data->initialized = false;
+    //     k_work_schedule(&data->work, K_MSEC(DT_INST_PROP(0, polling_interval_ms)));
+    //     return;
+    // }
 
     // キャリブレーションが必要な場合
     if (!data->calibrated) {
