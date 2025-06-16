@@ -762,11 +762,11 @@ static int tlx493d_read_sensor_data(const struct device *dev)
     }
 
     // Convert 12-bit values (MSB + 4 bits from LSB)
-    data->x = (int16_t)(((raw_data[0] << 4) | (raw_data[4] >> 4)) << 4) >> 4;
+    data->x = (int16_t)(((raw_data[1] << 4) | (raw_data[4] & 0x0F)) << 4) >> 4;
     // data->y = (int16_t)(((raw_data[1] << 4) | (raw_data[4] & 0x0F)) << 4) >> 4;
     // data->z = (int16_t)(((raw_data[2] << 4) | (raw_data[5] & 0x0F)) << 4) >> 4;
-    data->y = (int16_t)(((raw_data[1] << 4) | (raw_data[4] & 0x0F)) << 4) >> 4;
-    data->z = (int16_t)(((raw_data[2] << 4) | (raw_data[5] & 0x0F)) << 4) >> 4;
+    data->y = (int16_t)(((raw_data[2] << 4) | (raw_data[5] & 0x0F)) << 4) >> 4;
+    data->z = (int16_t)(((raw_data[0] << 4) | (raw_data[4] >> 4)) << 4) >> 4;
     
     // データ有効フラグを設定
     data->data_valid = true;
