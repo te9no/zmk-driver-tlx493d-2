@@ -73,6 +73,16 @@ LOG_MODULE_REGISTER(tlx493d, CONFIG_INPUT_LOG_LEVEL);
 // I2Cバスリカバリーの最大試行回数
 #define MAX_BUS_RECOVERY_ATTEMPTS 5
 
+// Power management states
+#define TLV493D_POWER_DOWN_DELAY_MS 100
+#define TLV493D_POWER_UP_DELAY_MS   200
+#define TLV493D_RESET_SEQUENCE_DELAY_MS 50
+
+// Additional recovery commands
+#define TLV493D_SOFT_RESET_CMD 0x00
+#define TLV493D_POWER_DOWN_CMD 0xFF
+#define TLV493D_POWER_UP_CMD   0x00
+
 struct tlx493d_config {
     struct i2c_dt_spec i2c;
     bool addr_pin_high;  // ADDR pin level configuration
@@ -122,6 +132,7 @@ static bool tlx493d_is_functional(const struct device *dev);
 static int tlx493d_update_reg_map(const struct device *dev);
 static void tlx493d_check_auto_recalibration(const struct device *dev);
 static void tlv493d_diagnose_error(const struct device *dev, int error_code);
+static int tlv493d_power_cycle(const struct device *dev);
 
 /**
  * @brief レジスタに値を書き込む
@@ -465,6 +476,51 @@ static int tlv493d_diagnose(const struct device *dev)
 }
 
 /**
+ * @brief センサーの電源をサイクルする
+ *
+ * @param dev デバイス構造体へのポインタ
+ * @return 0: 成功、負の値: エラーコード
+ */
+static int tlv493d_power_cycle(const struct device *dev)
+{
+    const struct tlx493d_config *config = dev->config;
+    struct tlx493d_data *data = dev->data;
+    int ret;
+
+    LOG_INF("Performing power cycle sequence");
+
+    // Step 1: Power down sequence
+    uint8_t power_down = TLV493D_POWER_DOWN_CMD;
+    ret = i2c_write_dt(&config->i2c, &power_down, 1);
+    if (ret < 0) {
+        LOG_WRN("Power down command failed (ret %d)", ret);
+    }
+    k_msleep(TLV493D_POWER_DOWN_DELAY_MS);
+
+    // Step 2: Send multiple reset frames
+    for (int i = 0; i < 3; i++) {
+        ret = tlv493d_send_recovery_frame(dev);
+        k_msleep(TLV493D_RESET_SEQUENCE_DELAY_MS);
+    }
+
+    // Step 3: Power up sequence
+    uint8_t power_up = TLV493D_POWER_UP_CMD;
+    ret = i2c_write_dt(&config->i2c, &power_up, 1);
+    if (ret < 0) {
+        LOG_WRN("Power up command failed (ret %d)", ret);
+    }
+    k_msleep(TLV493D_POWER_UP_DELAY_MS);
+
+    // Reset internal state
+    data->initialized = false;
+    data->calibrated = false;
+    data->data_valid = false;
+    data->error_count = 0;
+    
+    return 0;
+}
+
+/**
  * @brief センサーを初期化する
  *
  * @param dev デバイス構造体へのポインタ
@@ -476,37 +532,38 @@ static int tlv493d_initialize_sensor(const struct device *dev)
     int ret;
     uint8_t test_read;
     int retry_count = 0;
-    const int max_init_attempts = MAX_INIT_RETRIES; // 最大初期化試行回数
+    const int max_init_attempts = MAX_INIT_RETRIES;
     
     LOG_INF("Starting TLV493D sensor initialization sequence");
     
-    // 初期化前にI2Cバスリカバリーを試みる
-    ret = tlv493d_i2c_bus_recovery(dev);
+    // 初期化前に電源サイクルを実行
+    ret = tlv493d_power_cycle(dev);
     if (ret < 0) {
-        LOG_WRN("Initial I2C bus recovery failed (ret %d), proceeding with initialization attempts.", ret);
-        // バスリカバリーが失敗しても、初期化自体は試行する
+        LOG_WRN("Power cycle failed (ret %d), proceeding with initialization attempts.", ret);
     }
     
-    k_msleep(100); // 初期化前の十分な待機
+    k_msleep(200); // 電源サイクル後の十分な待機時間
     
     while (retry_count < max_init_attempts) {
         LOG_DBG("Initialization attempt %d/%d", retry_count + 1, max_init_attempts);
 
-        // Step 1: リカバリーフレーム送信
-        ret = tlv493d_send_recovery_frame(dev);
-        if (ret < 0) {
-            LOG_WRN("Recovery frame failed during init (attempt %d, ret %d)", retry_count + 1, ret);
-            goto next_attempt; // 次の試行へ
+        // Step 1: リカバリーフレームを複数回送信
+        for (int i = 0; i < 3; i++) {
+            ret = tlv493d_send_recovery_frame(dev);
+            if (ret < 0) {
+                LOG_WRN("Recovery frame %d failed (ret %d)", i + 1, ret);
+            }
+            k_msleep(INIT_STEP_DELAY_MS);
         }
-        k_msleep(INIT_STEP_DELAY_MS); // 待機時間を延長
         
-        // Step 2: リセットコマンド送信
-        ret = tlv493d_send_reset_command(dev);
-        if (ret < 0) {
-            LOG_WRN("Reset command failed during init (attempt %d, ret %d)", retry_count + 1, ret);
-            goto next_attempt; // 次の試行へ
+        // Step 2: リセットコマンドを複数回送信
+        for (int i = 0; i < 3; i++) {
+            ret = tlv493d_send_reset_command(dev);
+            if (ret < 0) {
+                LOG_WRN("Reset command %d failed (ret %d)", i + 1, ret);
+            }
+            k_msleep(RESET_DELAY_MS);
         }
-        k_msleep(RESET_DELAY_MS); // リセット後の待機時間を延長
         
         // Step 3: I2C通信テスト
         ret = tlx493d_read_reg(dev, TLV493D_REG_BX_MSB, &test_read);
@@ -793,136 +850,135 @@ static void tlx493d_work_handler(struct k_work *work) {
     struct tlx493d_data *data = CONTAINER_OF(dwork, struct tlx493d_data, work);
     const struct device *dev = data->dev;
     int ret;
+    static int consecutive_errors = 0;
+    static int64_t last_error_time = 0;
+    int64_t current_time = k_uptime_get();
 
-    // センサーが初期化されていない場合、初期化を試みる
+    // エラー状態の時間ベースリセット
+    if (current_time - last_error_time > 60000) { // 1分以上エラーがない
+        consecutive_errors = 0;
+    }
+
+    // センサーが初期化されていない場合の処理
     if (!data->initialized) {
+        // 連続エラー回数に応じて異なるリカバリー戦略を実行
+        if (consecutive_errors >= 3) {
+            LOG_WRN("Multiple initialization failures, performing power cycle");
+            ret = tlv493d_power_cycle(dev);
+            k_msleep(500); // 電源サイクル後の十分な待機時間
+            consecutive_errors = 0;
+        }
+        
         ret = tlv493d_initialize_sensor(dev);
         if (ret != 0) {
             LOG_ERR("Failed to initialize sensor in work handler (ret %d)", ret);
+            consecutive_errors++;
+            last_error_time = current_time;
             
-            // 初期化リトライ回数が多すぎる場合、I2Cバスリカバリーを実行
-            if (data->init_retries > MAX_INIT_RETRIES * 2) {
-                LOG_WRN("Too many initialization failures, performing I2C bus recovery");
-                // tlv493d_i2c_bus_recovery(dev);
-                data->init_retries = 0;
-            }
-            
-            // 次回のワークハンドラーで再試行するためにスケジュール
-            k_work_schedule(&data->work, K_MSEC(DT_INST_PROP(0, polling_interval_ms)));
+            // エラー回数に応じて待機時間を指数関数的に増加
+            int delay_ms = MIN(1000 * (1 << consecutive_errors), 30000);
+            k_work_schedule(&data->work, K_MSEC(delay_ms));
             return;
         }
     }
 
-    // // センサーが機能しているか確認
-    // if (!tlx493d_is_functional(dev)) {
-    //     LOG_WRN("Sensor is not functional, attempting to reinitialize");
-    //     data->initialized = false;
-    //     k_work_schedule(&data->work, K_MSEC(DT_INST_PROP(0, polling_interval_ms)));
-    //     return;
-    // }
+    // センサーデータの読み取りと処理
+    ret = tlx493d_read_sensor_data(dev);
+    if (ret != 0) {
+        consecutive_errors++;
+        last_error_time = current_time;
+        LOG_ERR("Failed to read sensor data (ret %d, consecutive errors: %d)", ret, consecutive_errors);
 
-    // キャリブレーションが必要な場合
-    if (!data->calibrated) {
-        tlx493d_calibrate(dev);
-        if (!data->calibrated) {
-            // Calibration failed, reschedule and try again
-            k_work_schedule(&data->work, K_MSEC(DT_INST_PROP(0, polling_interval_ms)));
-            return;
+        if (consecutive_errors >= 5) {
+            LOG_WRN("Too many consecutive errors, performing recovery sequence");
+            data->initialized = false;  // 強制的に再初期化
+            tlv493d_power_cycle(dev);
+            consecutive_errors = 0;
         }
+        
+        // エラー時は次回の実行を遅延
+        int delay_ms = MIN(1000 * (1 << consecutive_errors), 30000);
+        k_work_schedule(&data->work, K_MSEC(delay_ms));
+        return;
     }
 
-    // 自動キャリブレーションのチェック
-    tlx493d_check_auto_recalibration(dev);
+    // 正常に読み取れた場合
+    consecutive_errors = 0;
+    data->error_count = 0;
 
     int16_t current_x, current_y, current_z;
     int16_t delta_x, delta_y, delta_z;
     bool movement_detected_this_cycle = false;
 
-    ret = tlx493d_read_sensor_data(dev);
-    if (ret == 0) {
-        // 正常に読み取れた場合、エラーカウントをリセット
-        data->error_count = 0;
-        
-        current_x = data->x;
-        current_y = data->y;
-        current_z = data->z;
+    current_x = data->x;
+    current_y = data->y;
+    current_z = data->z;
 
-        delta_x = current_x - data->origin_x;
-        delta_y = current_y - data->origin_y;
-        delta_z = current_z - data->origin_z;
+    delta_x = current_x - data->origin_x;
+    delta_y = current_y - data->origin_y;
+    delta_z = current_z - data->origin_z;
 
-        bool report_sync = false;
+    bool report_sync = false;
 
-        // Hysteresis and Deadzone for X-axis
-        if (abs(delta_x) > HYSTERESIS_THRESHOLD) {
-            data->movement_active_x = true;
-            movement_detected_this_cycle = true;
-        } else if (abs(delta_x) < XY_DEADZONE) {
-            data->movement_active_x = false;
-        }
-        if (data->movement_active_x) {
-            input_report_rel(dev, INPUT_REL_X, delta_x, false, K_FOREVER);
-            report_sync = true;
-        }
-
-        // Hysteresis and Deadzone for Y-axis
-        if (abs(delta_y) > HYSTERESIS_THRESHOLD) {
-            data->movement_active_y = true;
-            movement_detected_this_cycle = true;
-        } else if (abs(delta_y) < XY_DEADZONE) {
-            data->movement_active_y = false;
-        }
-        if (data->movement_active_y) {
-            input_report_rel(dev, INPUT_REL_Y, delta_y, false, K_FOREVER);
-            report_sync = true;
-        }
-
-        // Hysteresis and Deadzone for Z-axis (Scroll)
-        if (abs(delta_z) > HYSTERESIS_THRESHOLD) {
-            data->movement_active_z = true;
-            movement_detected_this_cycle = true;
-        } else if (abs(delta_z) < Z_DEADZONE) {
-            data->movement_active_z = false;
-        }
-        if (data->movement_active_z) {
-            int16_t scroll_value = (delta_z > 0) ? 1 : -1; // Simplified scroll
-            input_report_rel(dev, INPUT_REL_WHEEL, scroll_value, false, K_FOREVER);
-            report_sync = true;
-        }
-
-        if (report_sync) {
-            input_report_rel(dev, INPUT_REL_X, 0, true, K_FOREVER); // Send sync event
-        } else {
-            // If no movement, send a dummy sync to keep ZMK active
-            input_report_rel(dev, INPUT_REL_X, 0, true, K_FOREVER);
-        }
-
-        // 移動検出状態の更新
-        if (movement_detected_this_cycle) {
-            // 移動を検出した場合、最終移動時間を更新
-            data->last_movement_time = k_uptime_get();
-            data->movement_detected = true;
-            LOG_DBG("Movement detected, updating last_movement_time: %lld", data->last_movement_time);
-        } else if (data->movement_detected) {
-            // 前回移動を検出していたが、今回検出しなかった場合
-            data->movement_detected = false;
-            LOG_DBG("Movement stopped, waiting for auto-recalibration timeout");
-        }
-
-        LOG_INF("Calibrated Delta: X=%d, Y=%d, Z=%d", delta_x, delta_y, delta_z);
-    } else {
-        // エラーカウントを増やす
-        data->error_count++;
-        
-        // エラーカウントが閾値を超えた場合、センサーを再初期化
-        if (data->error_count >= ERROR_THRESHOLD) {
-            LOG_WRN("Error threshold reached (%d), reinitializing sensor", data->error_count);
-            data->initialized = false;
-            data->error_count = 0;
-        }
+    // Hysteresis and Deadzone for X-axis
+    if (abs(delta_x) > HYSTERESIS_THRESHOLD) {
+        data->movement_active_x = true;
+        movement_detected_this_cycle = true;
+    } else if (abs(delta_x) < XY_DEADZONE) {
+        data->movement_active_x = false;
+    }
+    if (data->movement_active_x) {
+        input_report_rel(dev, INPUT_REL_X, delta_x, false, K_FOREVER);
+        report_sync = true;
     }
 
-    // 次回のワークをスケジュール
+    // Hysteresis and Deadzone for Y-axis
+    if (abs(delta_y) > HYSTERESIS_THRESHOLD) {
+        data->movement_active_y = true;
+        movement_detected_this_cycle = true;
+    } else if (abs(delta_y) < XY_DEADZONE) {
+        data->movement_active_y = false;
+    }
+    if (data->movement_active_y) {
+        input_report_rel(dev, INPUT_REL_Y, delta_y, false, K_FOREVER);
+        report_sync = true;
+    }
+
+    // Hysteresis and Deadzone for Z-axis (Scroll)
+    if (abs(delta_z) > HYSTERESIS_THRESHOLD) {
+        data->movement_active_z = true;
+        movement_detected_this_cycle = true;
+    } else if (abs(delta_z) < Z_DEADZONE) {
+        data->movement_active_z = false;
+    }
+    if (data->movement_active_z) {
+        int16_t scroll_value = (delta_z > 0) ? 1 : -1; // Simplified scroll
+        input_report_rel(dev, INPUT_REL_WHEEL, scroll_value, false, K_FOREVER);
+        report_sync = true;
+    }
+
+    if (report_sync) {
+        input_report_rel(dev, INPUT_REL_X, 0, true, K_FOREVER); // Send sync event
+    } else {
+        // If no movement, send a dummy sync to keep ZMK active
+        input_report_rel(dev, INPUT_REL_X, 0, true, K_FOREVER);
+    }
+
+    // 移動検出状態の更新
+    if (movement_detected_this_cycle) {
+        // 移動を検出した場合、最終移動時間を更新
+        data->last_movement_time = k_uptime_get();
+        data->movement_detected = true;
+        LOG_DBG("Movement detected, updating last_movement_time: %lld", data->last_movement_time);
+    } else if (data->movement_detected) {
+        // 前回移動を検出していたが、今回検出しなかった場合
+        data->movement_detected = false;
+        LOG_DBG("Movement stopped, waiting for auto-recalibration timeout");
+    }
+
+    LOG_INF("Calibrated Delta: X=%d, Y=%d, Z=%d", delta_x, delta_y, delta_z);
+
+    // 次回のワークをスケジュール（正常時は通常の間隔）
     k_work_schedule(&data->work, K_MSEC(DT_INST_PROP(0, polling_interval_ms)));
 }
 
