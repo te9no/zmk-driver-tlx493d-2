@@ -13,3 +13,17 @@ properties:
     type: int
     default: 10
     description: Polling interval in milliseconds
+  
+  reset-gpios:
+    type: phandle-array
+    description: |
+      GPIO pin for hardware reset (active low).
+      If specified, hardware reset will be used during initialization
+      and recovery sequences to ensure proper sensor state.
+  
+  power-gpios:
+    type: phandle-array
+    description: |
+      GPIO pin for power control (active high).
+      If specified, allows complete power cycling of the sensor
+      for recovery from stuck I2C states.
