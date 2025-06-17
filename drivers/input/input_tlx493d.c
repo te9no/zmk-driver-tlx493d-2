@@ -341,16 +341,10 @@ static int tlv493d_i2c_bus_recovery(const struct device *dev)
     LOG_INF("Performing I2C bus recovery (attempt %d/%d)", 
             data->bus_recovery_attempts, MAX_BUS_RECOVERY_ATTEMPTS);
 
-    // Step 1: ZephyrのI2Cバスリカバリー機能を試行
-    if (config->i2c.bus->api && config->i2c.bus->api->recover) {
-        ret = config->i2c.bus->api->recover(config->i2c.bus);
-        if (ret == 0) {
-            LOG_INF("Zephyr I2C bus recovery successful");
-            k_msleep(100); // リカバリー後の安定化時間
-            goto test_recovery;
-        }
-        LOG_WRN("Zephyr I2C bus recovery failed (ret %d), attempting manual recovery", ret);
-    }
+    // Step 1: ZephyrのI2Cバスリカバリー機能を試行（利用可能な場合）
+    // Note: Zephyr I2C recover API は全てのドライバーで利用可能ではないため、
+    // 手動リカバリーを実行する
+    LOG_DBG("Performing manual I2C bus recovery sequence");
 
     // Step 2: 手動バスクリア - 9クロックパルス生成でSDAライン解放
     LOG_DBG("Generating 9 clock pulses to clear stuck I2C transaction");
