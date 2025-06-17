@@ -7,7 +7,6 @@
 
 #include <zephyr/device.h>
 #include <zephyr/drivers/i2c.h>
-#include <zephyr/drivers/gpio.h>
 #include <zephyr/input/input.h>
 #include <zephyr/kernel.h>
 #include <zephyr/logging/log.h>
@@ -19,18 +18,10 @@ LOG_MODULE_REGISTER(tlx493d, CONFIG_INPUT_LOG_LEVEL);
 
 // TLV493D-A1B6 Registers
 #define TLV493D_REG_BX_MSB      0x00
-#define TLV493D_REG_BY_MSB      0x01
-#define TLV493D_REG_BZ_MSB      0x02
-#define TLV493D_REG_TEMP_MSB    0x03
-#define TLV493D_REG_BX_LSB      0x04
-#define TLV493D_REG_BY_LSB      0x05
-#define TLV493D_REG_BZ_LSB      0x06
 #define TLV493D_REG_TEMP_LSB    0x07
-#define TLV493D_REG_FRM         0x08  // Frame Counter register
-#define TLV493D_REG_CH          0x09  // Channel register
-#define TLV493D_REG_MAP_SIZE    10    // レジスタマップのサイズ
+#define TLV493D_REG_MAP_SIZE    10  // レジスタマップのサイズ
 
-// Write registers  
+// Write registers
 #define TLV493D_REG_MOD1        0x01
 #define TLV493D_REG_MOD2        0x03
 
@@ -40,13 +31,9 @@ LOG_MODULE_REGISTER(tlx493d, CONFIG_INPUT_LOG_LEVEL);
 // MOD2 register bits  
 #define TLV493D_MOD2_TEMP_EN    BIT(7)  // 正しいビット位置に修正（ビット7）
 
-// Frame Counter register bits (Register 0x08)
-#define TLV493D_FRM_COUNTER_MASK 0x03  // Frame counter bits [1:0]
-
 // Recovery and reset commands
 #define TLV493D_RECOVERY_CMD    0xFF
 #define TLV493D_RESET_CMD       0x00
-#define TLV493D_GENERAL_RESET   0x00  // General address reset for ADC hang recovery
 
 // Bar graph settings
 #define BAR_GRAPH_WIDTH 40
@@ -86,13 +73,9 @@ LOG_MODULE_REGISTER(tlx493d, CONFIG_INPUT_LOG_LEVEL);
 // I2Cバスリカバリーの最大試行回数
 #define MAX_BUS_RECOVERY_ATTEMPTS 5
 
-// ADC hang detection settings
-#define ADC_HANG_TIMEOUT_MS 5000        // 5秒でADCハング検出
-#define FRAME_COUNTER_STUCK_THRESHOLD 10 // フレームカウンター停止検出の閾値
-
 // Power management states
 #define TLV493D_POWER_DOWN_DELAY_MS 100
-#define TLV493D_POWER_UP_DELAY_MS   500
+#define TLV493D_POWER_UP_DELAY_MS   200
 #define TLV493D_RESET_SEQUENCE_DELAY_MS 50
 
 // Additional recovery commands
@@ -103,8 +86,6 @@ LOG_MODULE_REGISTER(tlx493d, CONFIG_INPUT_LOG_LEVEL);
 struct tlx493d_config {
     struct i2c_dt_spec i2c;
     bool addr_pin_high;  // ADDR pin level configuration
-    struct gpio_dt_spec reset_gpio;  // Hardware reset pin (active low)
-    struct gpio_dt_spec power_gpio;  // Power control pin (active high)
 };
 
 struct tlx493d_data {
@@ -131,12 +112,6 @@ struct tlx493d_data {
     int64_t last_movement_time; // 最後に移動を検知した時間（ms）
     bool movement_detected; // 移動検知フラグ
     uint8_t bus_recovery_attempts; // I2Cバスリカバリー試行回数
-    
-    // ADC hang detection
-    uint8_t last_frame_counter; // 前回のフレームカウンター値
-    uint8_t frame_counter_stuck_count; // フレームカウンター停止回数
-    int64_t last_frame_counter_check; // 前回のフレームカウンターチェック時間
-    bool adc_hang_detected; // ADCハング検出フラグ
 };
 
 // 関数プロトタイプ宣言
@@ -158,10 +133,6 @@ static int tlx493d_update_reg_map(const struct device *dev);
 static void tlx493d_check_auto_recalibration(const struct device *dev);
 static void tlv493d_diagnose_error(const struct device *dev, int error_code);
 static int tlv493d_power_cycle(const struct device *dev);
-static int tlv493d_hardware_reset(const struct device *dev);
-static int tlv493d_send_general_reset(const struct device *dev);
-static bool tlv493d_check_adc_hang(const struct device *dev);
-static int tlv493d_recover_from_adc_hang(const struct device *dev);
 
 /**
  * @brief レジスタに値を書き込む
@@ -323,10 +294,9 @@ static int tlv493d_send_reset_command(const struct device *dev)
  * @brief I2Cバスをリカバリーする関数
  *
  * I2Cバスが不定状態になった場合に、バスをリセットして正常状態に戻す
- * 1. Zephyr I2Cリカバリー機能を使用
- * 2. クロックパルス生成でバスクリア
- * 3. リカバリーフレーム送信
- * 4. センサーリセット
+ * 1. スタート・ストップコンディションを送信
+ * 2. 待機時間を延長
+ * 3. リカバリーフレーム(0xFF)を送信
  *
  * @param dev デバイス構造体へのポインタ
  * @return 0: 成功、負の値: エラーコード
@@ -341,78 +311,54 @@ static int tlv493d_i2c_bus_recovery(const struct device *dev)
     LOG_INF("Performing I2C bus recovery (attempt %d/%d)", 
             data->bus_recovery_attempts, MAX_BUS_RECOVERY_ATTEMPTS);
 
-    // Step 1: ZephyrのI2Cバスリカバリー機能を試行（利用可能な場合）
-    // Note: Zephyr I2C recover API は全てのドライバーで利用可能ではないため、
-    // 手動リカバリーを実行する
-    LOG_DBG("Performing manual I2C bus recovery sequence");
+    // ZephyrのI2CバスリカバリーAPIがあれば利用する
+    // 例: if (i2c_recover_bus(&config->i2c) == 0) {
+    //         LOG_INF("Zephyr I2C bus recovery successful");
+    //         return 0;
+    //    }
+    //    LOG_WRN("Zephyr I2C bus recovery failed, attempting manual recovery");
 
-    // Step 2: 手動バスクリア - 9クロックパルス生成でSDAライン解放
-    LOG_DBG("Generating 9 clock pulses to clear stuck I2C transaction");
-    for (int i = 0; i < 9; i++) {
-        // ダミーリードでクロックパルス生成
-        uint8_t dummy;
-        ret = i2c_reg_read_byte_dt(&config->i2c, 0xFF, &dummy);
-        k_usleep(10); // 10μs間隔
-    }
-    k_msleep(10);
-
-    // Step 3: ストップコンディション強制生成
-    uint8_t stop_dummy = 0;
-    ret = i2c_write_dt(&config->i2c, &stop_dummy, 0);
+    // 1. I2Cバスをリセットするためのシーケンス
+    //    空のメッセージを送信することで、バスの状態をリフレッシュする
+    uint8_t dummy = 0;
+    ret = i2c_write_dt(&config->i2c, &dummy, 0); // ストップコンディションを生成
     if (ret < 0) {
         LOG_WRN("I2C bus recovery: Failed to send stop condition (ret %d)", ret);
     }
-    k_msleep(50);
+    k_msleep(50); // 十分な待機時間
 
-    // Step 4: センサー固有のリカバリーシーケンス
-    // 複数のリカバリーフレーム(0xFF)を送信
-    for (int i = 0; i < 5; i++) {
+    // 2. リカバリーフレーム(0xFF)を複数回送信し、センサーをリセット状態に誘導
+    for (int i = 0; i < 3; i++) { // 複数回送信を試みる
         ret = tlv493d_send_recovery_frame(dev);
         if (ret < 0) {
-            LOG_WRN("I2C bus recovery: Recovery frame %d failed (ret %d)", i + 1, ret);
+            LOG_WRN("I2C bus recovery: Recovery frame failed (attempt %d, ret %d)", i + 1, ret);
         }
-        k_msleep(20);
+        k_msleep(20); // 各送信間の短い待機
     }
-    k_msleep(100);
+    k_msleep(50); // 追加の待機時間
 
-    // Step 5: センサーリセットシーケンス
-    for (int i = 0; i < 3; i++) {
-        ret = tlv493d_send_reset_command(dev);
-        if (ret < 0) {
-            LOG_WRN("I2C bus recovery: Reset command %d failed (ret %d)", i + 1, ret);
-        }
-        k_msleep(RESET_DELAY_MS);
+    // 3. リセットコマンド(0x00)を送信
+    ret = tlv493d_send_reset_command(dev);
+    if (ret < 0) {
+        LOG_WRN("I2C bus recovery: Reset command failed (ret %d)", ret);
     }
-    k_msleep(200); // 最終安定化時間
+    k_msleep(RESET_DELAY_MS); // リセット後の待機時間を確保
 
-test_recovery:
-    // Step 6: バス状態検証 - 複数レジスタでテスト
-    uint8_t test_values[3];
-    bool recovery_success = true;
-    
-    for (int i = 0; i < 3; i++) {
-        ret = tlx493d_read_reg(dev, TLV493D_REG_BX_MSB + i, &test_values[i]);
-        if (ret < 0) {
-            LOG_WRN("I2C bus recovery: Test read %d failed (ret %d)", i, ret);
-            recovery_success = false;
-            break;
-        }
-        k_msleep(5);
-    }
-    
-    if (recovery_success) {
+    // 4. 最終的なバスの状態確認（簡単な読み取りテスト）
+    uint8_t test_read;
+    ret = tlx493d_read_reg(dev, TLV493D_REG_BX_MSB, &test_read);
+    if (ret == 0) {
         LOG_INF("I2C bus recovery completed successfully");
-        LOG_DBG("Test reads: 0x%02X 0x%02X 0x%02X", test_values[0], test_values[1], test_values[2]);
-        data->bus_recovery_attempts = 0;
+        data->bus_recovery_attempts = 0; // 成功したらカウンターをリセット
         return 0;
     } else {
-        LOG_WRN("I2C bus recovery failed validation");
+        LOG_WRN("I2C bus recovery: Post-recovery read test failed (ret %d)", ret);
         if (data->bus_recovery_attempts >= MAX_BUS_RECOVERY_ATTEMPTS) {
-            LOG_ERR("I2C bus recovery: Maximum attempts reached, sensor may need hardware reset");
-            data->bus_recovery_attempts = 0;
-            return -EIO;
+            LOG_ERR("I2C bus recovery: Maximum attempts reached, bus may be unrecoverable without hardware reset.");
+            data->bus_recovery_attempts = 0; // カウンターをリセット
+            return -EIO; // 最終的に失敗
         }
-        return -EAGAIN; // リトライを促す
+        return ret; // リカバリー失敗
     }
 }
 
@@ -530,227 +476,7 @@ static int tlv493d_diagnose(const struct device *dev)
 }
 
 /**
- * @brief General address 0x00 reset command for ADC hang recovery
- * 
- * Per TLX493D manual section 5.6, send general address 0x00 to reset
- * the sensor when ADC conversion hangs up in Master Controlled or Fast Mode.
- *
- * @param dev デバイス構造体へのポインタ
- * @return 0: 成功、負の値: エラーコード
- */
-static int tlv493d_send_general_reset(const struct device *dev)
-{
-    const struct tlx493d_config *config = dev->config;
-    int ret;
-    
-    LOG_INF("Sending general address reset (0x00) for ADC hang recovery");
-    
-    // Send general address 0x00 - this is a special I2C transaction
-    // that resets the sensor's ADC conversion state machine
-    uint8_t general_reset_addr = 0x00;
-    
-    // Create an I2C message with the general reset address
-    struct i2c_msg msg = {
-        .buf = &general_reset_addr,
-        .len = 1,
-        .flags = I2C_MSG_WRITE | I2C_MSG_STOP
-    };
-    
-    ret = i2c_transfer(config->i2c.bus, &msg, 1, 0x00); // Use general call address 0x00
-    if (ret < 0) {
-        LOG_ERR("General reset command failed (ret %d)", ret);
-        return ret;
-    }
-    
-    LOG_DBG("General reset command sent successfully");
-    k_msleep(RESET_DELAY_MS); // Wait for reset to complete
-    
-    return 0;
-}
-
-/**
- * @brief ADCハング状態をチェックする
- *
- * フレームカウンターの更新状況を監視し、ADCがハングアップしているかを検出する
- * TLX493D manual section 5.6に基づく実装
- *
- * @param dev デバイス構造体へのポインタ
- * @return true: ADCハング検出、false: 正常動作
- */
-static bool tlv493d_check_adc_hang(const struct device *dev)
-{
-    struct tlx493d_data *data = dev->data;
-    uint8_t current_frame_counter;
-    int ret;
-    int64_t current_time = k_uptime_get();
-    
-    // Read current frame counter (FRM register 0x08)
-    ret = tlx493d_read_reg(dev, TLV493D_REG_FRM, &current_frame_counter);
-    if (ret < 0) {
-        LOG_WRN("Failed to read frame counter for ADC hang detection (ret %d)", ret);
-        return false; // Can't detect hang if we can't read the register
-    }
-    
-    // Extract frame counter bits [1:0]
-    current_frame_counter &= TLV493D_FRM_COUNTER_MASK;
-    
-    // Initialize on first check
-    if (data->last_frame_counter_check == 0) {
-        data->last_frame_counter = current_frame_counter;
-        data->last_frame_counter_check = current_time;
-        data->frame_counter_stuck_count = 0;
-        return false;
-    }
-    
-    // Check if enough time has passed for a frame counter update
-    int64_t time_elapsed = current_time - data->last_frame_counter_check;
-    if (time_elapsed < 100) { // Check every 100ms minimum
-        return data->adc_hang_detected;
-    }
-    
-    // Check if frame counter has incremented
-    if (current_frame_counter == data->last_frame_counter) {
-        data->frame_counter_stuck_count++;
-        LOG_DBG("Frame counter stuck at %d (count: %d)", 
-                current_frame_counter, data->frame_counter_stuck_count);
-        
-        // If frame counter stuck for too long, declare ADC hang
-        if (data->frame_counter_stuck_count >= FRAME_COUNTER_STUCK_THRESHOLD) {
-            if (!data->adc_hang_detected) {
-                LOG_WRN("ADC hang detected: Frame counter stuck at %d for %d checks", 
-                        current_frame_counter, data->frame_counter_stuck_count);
-                data->adc_hang_detected = true;
-            }
-            return true;
-        }
-    } else {
-        // Frame counter incremented - ADC is working
-        if (data->adc_hang_detected) {
-            LOG_INF("ADC hang cleared: Frame counter incremented from %d to %d", 
-                    data->last_frame_counter, current_frame_counter);
-        }
-        data->frame_counter_stuck_count = 0;
-        data->adc_hang_detected = false;
-        data->last_frame_counter = current_frame_counter;
-        data->last_frame_counter_check = current_time;
-    }
-    
-    return false;
-}
-
-/**
- * @brief ADCハングからのリカバリーを実行する
- *
- * TLX493D manual section 5.6に従って：
- * 1. General address 0x00でセンサーをリセット
- * 2. Master Controlled Mode / Fast Modeに再設定
- *
- * @param dev デバイス構造体へのポインタ
- * @return 0: 成功、負の値: エラーコード
- */
-static int tlv493d_recover_from_adc_hang(const struct device *dev)
-{
-    struct tlx493d_data *data = dev->data;
-    int ret;
-    
-    LOG_INF("Recovering from ADC hang condition");
-    
-    // Step 1: Send general address 0x00 to reset the sensor
-    ret = tlv493d_send_general_reset(dev);
-    if (ret < 0) {
-        LOG_ERR("General reset failed during ADC hang recovery (ret %d)", ret);
-        return ret;
-    }
-    
-    // Step 2: Re-read factory settings
-    ret = tlv493d_read_factory_settings(dev);
-    if (ret < 0) {
-        LOG_ERR("Failed to read factory settings during ADC hang recovery (ret %d)", ret);
-        return ret;
-    }
-    
-    // Step 3: Re-configure sensor to Master Controlled Mode / Fast Mode
-    ret = tlv493d_configure_sensor(dev);
-    if (ret < 0) {
-        LOG_ERR("Failed to re-configure sensor during ADC hang recovery (ret %d)", ret);
-        return ret;
-    }
-    
-    // Reset ADC hang detection state
-    data->adc_hang_detected = false;
-    data->frame_counter_stuck_count = 0;
-    data->last_frame_counter_check = 0;
-    data->last_frame_counter = 0;
-    
-    LOG_INF("ADC hang recovery completed successfully");
-    return 0;
-}
-
-/**
- * @brief ハードウェアリセットを実行する
- *
- * @param dev デバイス構造体へのポインタ
- * @return 0: 成功、負の値: エラーコード
- */
-static int tlv493d_hardware_reset(const struct device *dev)
-{
-    const struct tlx493d_config *config = dev->config;
-    struct tlx493d_data *data = dev->data;
-    int ret = 0;
-
-    LOG_INF("Performing hardware reset sequence");
-
-    // Step 1: Hardware power cycle if power GPIO is available
-    if (gpio_is_ready_dt(&config->power_gpio)) {
-        LOG_DBG("Power cycling sensor via GPIO");
-        
-        // Power off
-        ret = gpio_pin_set_dt(&config->power_gpio, 0);
-        if (ret < 0) {
-            LOG_WRN("Failed to power off sensor (ret %d)", ret);
-        }
-        k_msleep(200); // Extended power-off time
-        
-        // Power on
-        ret = gpio_pin_set_dt(&config->power_gpio, 1);
-        if (ret < 0) {
-            LOG_WRN("Failed to power on sensor (ret %d)", ret);
-        }
-        k_msleep(TLV493D_POWER_UP_DELAY_MS); // Extended power-up time
-    }
-
-    // Step 2: Hardware reset if reset GPIO is available
-    if (gpio_is_ready_dt(&config->reset_gpio)) {
-        LOG_DBG("Performing hardware reset via GPIO");
-        
-        // Assert reset (active low)
-        ret = gpio_pin_set_dt(&config->reset_gpio, 0);
-        if (ret < 0) {
-            LOG_WRN("Failed to assert reset (ret %d)", ret);
-        }
-        k_msleep(50); // Hold reset for 50ms
-        
-        // Release reset
-        ret = gpio_pin_set_dt(&config->reset_gpio, 1);
-        if (ret < 0) {
-            LOG_WRN("Failed to release reset (ret %d)", ret);
-        }
-        k_msleep(TLV493D_POWER_UP_DELAY_MS); // Wait for sensor to stabilize
-    }
-
-    // Reset internal state
-    data->initialized = false;
-    data->calibrated = false;
-    data->data_valid = false;
-    data->error_count = 0;
-    data->bus_recovery_attempts = 0;
-    
-    LOG_INF("Hardware reset sequence completed");
-    return ret;
-}
-
-/**
- * @brief センサーの電源をサイクルする（ソフトウェア版）
+ * @brief センサーの電源をサイクルする
  *
  * @param dev デバイス構造体へのポインタ
  * @return 0: 成功、負の値: エラーコード
@@ -761,39 +487,27 @@ static int tlv493d_power_cycle(const struct device *dev)
     struct tlx493d_data *data = dev->data;
     int ret;
 
-    LOG_INF("Performing software power cycle sequence");
+    LOG_INF("Performing power cycle sequence");
 
-    // Try hardware reset first if available
-    if (gpio_is_ready_dt(&config->reset_gpio) || gpio_is_ready_dt(&config->power_gpio)) {
-        return tlv493d_hardware_reset(dev);
-    }
-
-    // Fallback to software power cycle
-    // Step 1: Extended power down sequence
-    for (int i = 0; i < 5; i++) {
-        uint8_t power_down = TLV493D_POWER_DOWN_CMD;
-        ret = i2c_write_dt(&config->i2c, &power_down, 1);
-        if (ret < 0) {
-            LOG_WRN("Power down command %d failed (ret %d)", i + 1, ret);
-        }
-        k_msleep(50);
+    // Step 1: Power down sequence
+    uint8_t power_down = TLV493D_POWER_DOWN_CMD;
+    ret = i2c_write_dt(&config->i2c, &power_down, 1);
+    if (ret < 0) {
+        LOG_WRN("Power down command failed (ret %d)", ret);
     }
     k_msleep(TLV493D_POWER_DOWN_DELAY_MS);
 
-    // Step 2: Multiple recovery frames to clear any stuck states
-    for (int i = 0; i < 10; i++) {
+    // Step 2: Send multiple reset frames
+    for (int i = 0; i < 3; i++) {
         ret = tlv493d_send_recovery_frame(dev);
         k_msleep(TLV493D_RESET_SEQUENCE_DELAY_MS);
     }
 
-    // Step 3: Extended power up sequence
-    for (int i = 0; i < 3; i++) {
-        uint8_t power_up = TLV493D_POWER_UP_CMD;
-        ret = i2c_write_dt(&config->i2c, &power_up, 1);
-        if (ret < 0) {
-            LOG_WRN("Power up command %d failed (ret %d)", i + 1, ret);
-        }
-        k_msleep(100);
+    // Step 3: Power up sequence
+    uint8_t power_up = TLV493D_POWER_UP_CMD;
+    ret = i2c_write_dt(&config->i2c, &power_up, 1);
+    if (ret < 0) {
+        LOG_WRN("Power up command failed (ret %d)", ret);
     }
     k_msleep(TLV493D_POWER_UP_DELAY_MS);
 
@@ -803,7 +517,6 @@ static int tlv493d_power_cycle(const struct device *dev)
     data->data_valid = false;
     data->error_count = 0;
     
-    LOG_INF("Software power cycle sequence completed");
     return 0;
 }
 
@@ -1169,39 +882,12 @@ static void tlx493d_work_handler(struct k_work *work) {
         }
     }
 
-    // ADCハング検出チェック
-    if (tlv493d_check_adc_hang(dev)) {
-        LOG_WRN("ADC hang detected, attempting recovery");
-        ret = tlv493d_recover_from_adc_hang(dev);
-        if (ret != 0) {
-            LOG_ERR("ADC hang recovery failed (ret %d), performing full power cycle", ret);
-            data->initialized = false;
-            tlv493d_power_cycle(dev);
-        }
-        // ADCハング回復後は次回まで待機
-        k_work_schedule(&data->work, K_MSEC(1000));
-        return;
-    }
-
     // センサーデータの読み取りと処理
     ret = tlx493d_read_sensor_data(dev);
     if (ret != 0) {
         consecutive_errors++;
         last_error_time = current_time;
         LOG_ERR("Failed to read sensor data (ret %d, consecutive errors: %d)", ret, consecutive_errors);
-
-        // ADCハングの可能性をチェック
-        if (consecutive_errors >= 3) {
-            if (tlv493d_check_adc_hang(dev)) {
-                LOG_INF("Sensor read errors may be due to ADC hang, attempting recovery");
-                ret = tlv493d_recover_from_adc_hang(dev);
-                if (ret == 0) {
-                    consecutive_errors = 0; // ADCリカバリー成功
-                    k_work_schedule(&data->work, K_MSEC(500));
-                    return;
-                }
-            }
-        }
 
         if (consecutive_errors >= 5) {
             LOG_WRN("Too many consecutive errors, performing recovery sequence");
@@ -1322,12 +1008,6 @@ static int tlx493d_init(const struct device *dev)
     data->movement_detected = false;
     data->bus_recovery_attempts = 0;
     
-    // Initialize ADC hang detection
-    data->last_frame_counter = 0;
-    data->frame_counter_stuck_count = 0;
-    data->last_frame_counter_check = 0;
-    data->adc_hang_detected = false;
-    
     // レジスタマップを初期化
     memset(data->reg_map, 0, TLV493D_REG_MAP_SIZE);
 
@@ -1336,45 +1016,14 @@ static int tlx493d_init(const struct device *dev)
         return -ENODEV;
     }
 
-    // Initialize GPIO pins if present
-    int ret;
-    if (gpio_is_ready_dt(&config->reset_gpio)) {
-        ret = gpio_pin_configure_dt(&config->reset_gpio, GPIO_OUTPUT_ACTIVE);
-        if (ret < 0) {
-            LOG_ERR("Failed to configure reset GPIO (ret %d)", ret);
-            return ret;
-        }
-        LOG_DBG("Reset GPIO configured");
-    }
-    
-    if (gpio_is_ready_dt(&config->power_gpio)) {
-        ret = gpio_pin_configure_dt(&config->power_gpio, GPIO_OUTPUT_INACTIVE);
-        if (ret < 0) {
-            LOG_ERR("Failed to configure power GPIO (ret %d)", ret);
-            return ret;
-        }
-        // Ensure sensor is powered on
-        ret = gpio_pin_set_dt(&config->power_gpio, 1);
-        if (ret < 0) {
-            LOG_ERR("Failed to power on sensor (ret %d)", ret);
-            return ret;
-        }
-        k_msleep(TLV493D_POWER_UP_DELAY_MS);
-        LOG_DBG("Power GPIO configured and sensor powered on");
-    }
-
-    // Perform hardware reset if available, otherwise I2C bus recovery
-    if (gpio_is_ready_dt(&config->reset_gpio) || gpio_is_ready_dt(&config->power_gpio)) {
-        tlv493d_hardware_reset(dev);
-    } else {
-        tlv493d_i2c_bus_recovery(dev);
-    }
+    // I2Cバスリカバリーを最初に実行
+    tlv493d_i2c_bus_recovery(dev);
 
     // 初期化前に長めの待機時間を追加
     k_msleep(100);
 
     // Perform sensor initialization sequence according to datasheet
-    ret = tlv493d_initialize_sensor(dev);
+    int ret = tlv493d_initialize_sensor(dev);
     if (ret != 0) {
         LOG_ERR("Sensor initialization failed (ret %d)", ret);
         // 初期化に失敗しても、ワークハンドラーで再試行するため、
@@ -1401,8 +1050,6 @@ static int tlx493d_init(const struct device *dev)
     static const struct tlx493d_config tlx493d_config_##inst = { \
         .i2c = I2C_DT_SPEC_INST_GET(inst), \
         .addr_pin_high = DT_INST_PROP_OR(inst, addr_pin_high, false), \
-        .reset_gpio = GPIO_DT_SPEC_INST_GET_OR(inst, reset_gpios, {0}), \
-        .power_gpio = GPIO_DT_SPEC_INST_GET_OR(inst, power_gpios, {0}), \
     }; \
     DEVICE_DT_INST_DEFINE(inst, tlx493d_init, NULL, \
                           &tlx493d_data_##inst, &tlx493d_config_##inst, \
