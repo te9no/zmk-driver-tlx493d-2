@@ -13,3 +13,22 @@ properties:
     type: int
     default: 10
     description: Polling interval in milliseconds
+    
+  reset-gpios:
+    type: phandle-array
+    description: |
+      Reset GPIO pin (active low). When specified, the driver will use
+      hardware reset for more reliable sensor recovery from ADC hang conditions.
+      
+  power-gpios:
+    type: phandle-array
+    description: |
+      Power control GPIO pin (active high). When specified, the driver can
+      perform complete power cycles for sensor recovery.
+      
+  addr-pin-high:
+    type: boolean
+    description: |
+      Set this property if the ADDR pin is connected to VDD (high).
+      If not set, ADDR pin is assumed to be connected to GND (low).
+      This affects the I2C address: 0x5E (ADDR=low) or 0x1F (ADDR=high).
