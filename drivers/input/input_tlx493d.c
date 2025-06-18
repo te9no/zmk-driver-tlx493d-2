@@ -118,7 +118,6 @@ static int tlx493d_read_multiple(const struct device *dev, uint8_t start_addr, u
 static int tlv493d_send_recovery_frame(const struct device *dev);
 static int tlv493d_send_reset_command(const struct device *dev);
 static int tlv493d_general_reset(const struct device *dev);
-static int tlv493d_i2c_bus_recovery(const struct device *dev);
 static int tlv493d_read_factory_settings(const struct device *dev);
 static int tlv493d_configure_sensor(const struct device *dev);
 static int tlv493d_diagnose(const struct device *dev);
@@ -245,50 +244,6 @@ static int tlv493d_general_reset(const struct device *dev)
     // センサーが内部リセットシーケンスを完了するのを待ちます。
     k_msleep(RESET_DELAY_MS);
     return 0;
-}
-
-
-/**
- * @brief I2Cバスをリカバリーする
- */
-static int tlv493d_i2c_bus_recovery(const struct device *dev)
-{
-    const struct tlx493d_config *config = dev->config;
-    struct tlx493d_data *data = dev->data;
-    int ret;
-
-    data->bus_recovery_attempts++;
-    LOG_INF("Performing I2C bus recovery (attempt %d/%d)",
-            data->bus_recovery_attempts, MAX_BUS_RECOVERY_ATTEMPTS);
-
-    uint8_t dummy = 0;
-    i2c_write_dt(&config->i2c, &dummy, 0);
-    k_msleep(50);
-
-    for (int i = 0; i < 3; i++) {
-        tlv493d_send_recovery_frame(dev);
-        k_msleep(20);
-    }
-    k_msleep(50);
-
-    tlv493d_send_reset_command(dev);
-    k_msleep(RESET_DELAY_MS);
-
-    uint8_t test_read;
-    ret = tlx493d_read_reg(dev, TLV493D_REG_BX_MSB, &test_read);
-    if (ret == 0) {
-        LOG_INF("I2C bus recovery completed successfully");
-        data->bus_recovery_attempts = 0;
-        return 0;
-    } else {
-        LOG_WRN("I2C bus recovery: Post-recovery read test failed (ret %d)", ret);
-        if (data->bus_recovery_attempts >= MAX_BUS_RECOVERY_ATTEMPTS) {
-            LOG_ERR("I2C bus recovery failed after max attempts.");
-            data->bus_recovery_attempts = 0;
-            return -EIO;
-        }
-        return ret;
-    }
 }
 
 /**
