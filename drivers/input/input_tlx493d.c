@@ -604,10 +604,6 @@ static void tlx493d_work_handler(struct k_work *work) {
         report_sync = true;
     }
 
-    if (report_sync) {
-        input_report_sync(dev, K_FOREVER);
-    }
-
     k_work_schedule(&data->work, K_MSEC(DT_INST_PROP(0, polling_interval_ms)));
 }
 
