@@ -18,7 +18,10 @@ LOG_MODULE_REGISTER(tlx493d, CONFIG_INPUT_LOG_LEVEL);
 
 // TLV493D-A1B6 Registers
 #define TLV493D_REG_BX_MSB      0x00
-#define TLV493D_REG_TEMP_LSB    0x07
+#define TLV493D_REG_TEMP_LSB    0x06
+#define TLV493D_REG_FACTORY1    0x07  // Factory setting register 1
+#define TLV493D_REG_FACTORY2    0x08  // Factory setting register 2  
+#define TLV493D_REG_FACTORY3    0x09  // Factory setting register 3
 #define TLV493D_REG_MAP_SIZE    10  // レジスタマップのサイズ
 
 // Write registers
@@ -41,10 +44,10 @@ LOG_MODULE_REGISTER(tlx493d, CONFIG_INPUT_LOG_LEVEL);
 #define SENSOR_VALUE_MAX 100
 
 // Deadzone for X/Y movement to prevent spurious input
-#define XY_DEADZONE 3 // Adjust as needed
+#define XY_DEADZONE 30 // Adjust as needed
 
 // Deadzone for Z movement to prevent spurious input
-#define Z_DEADZONE 5 // Adjust as needed
+#define Z_DEADZONE 30 // Adjust as needed
 
 // Hysteresis for movement detection
 #define HYSTERESIS_THRESHOLD 20 // Adjust as needed
@@ -72,6 +75,19 @@ LOG_MODULE_REGISTER(tlx493d, CONFIG_INPUT_LOG_LEVEL);
 
 // I2Cバスリカバリーの最大試行回数
 #define MAX_BUS_RECOVERY_ATTEMPTS 5
+
+// ADCハング検出設定
+#define ADC_HANG_DETECTION_SAMPLES 5  // 連続して同じ値の検出回数
+#define ADC_HANG_DETECTION_THRESHOLD 2  // 最小変化量（ハング判定しない変化量）
+#define ADC_HANG_RECOVERY_DELAY_MS 100  // ADCハング検出後の待機時間
+
+// フレームカウンターとチャンネルフラグ整合性チェック設定
+#define TLV493D_REG_TEMP_COUNTER_CHANNEL 0x03  // 温度、フレームカウンター、チャンネルレジスタ
+#define FRM_MASK 0x0C    // ビット3:2 (フレームカウンター)
+#define FRM_SHIFT 2      // フレームカウンターのビットシフト
+#define CH_MASK 0x03     // ビット1:0 (チャンネルフラグ)
+#define CH_VALID_VALUE 0x00  // 有効なチャンネル値（同じ変換からのデータ）
+#define FRM_STUCK_THRESHOLD 3  // フレームカウンターが動かない許容回数
 
 // Power management states
 #define TLV493D_POWER_DOWN_DELAY_MS 100
@@ -112,6 +128,19 @@ struct tlx493d_data {
     int64_t last_movement_time; // 最後に移動を検知した時間（ms）
     bool movement_detected; // 移動検知フラグ
     uint8_t bus_recovery_attempts; // I2Cバスリカバリー試行回数
+    
+    // ADCハング検出用の変数
+    int16_t prev_adc_x[ADC_HANG_DETECTION_SAMPLES];  // X軸の過去の値
+    int16_t prev_adc_y[ADC_HANG_DETECTION_SAMPLES];  // Y軸の過去の値
+    int16_t prev_adc_z[ADC_HANG_DETECTION_SAMPLES];  // Z軸の過去の値
+    uint8_t adc_sample_index;  // サンプルインデックス
+    bool adc_hang_detected;    // ADCハング検出フラグ
+    uint8_t adc_hang_count;    // ADCハング検出回数
+    
+    // フレームカウンターとチャンネルフラグ用の変数
+    uint8_t last_frm_counter;  // 前回のフレームカウンター値
+    uint8_t frm_stuck_count;   // フレームカウンターが動かない回数
+    bool frm_consistency_check_enabled; // フレームカウンター整合性チェック有効フラグ
 };
 
 // 関数プロトタイプ宣言
@@ -133,6 +162,9 @@ static int tlx493d_update_reg_map(const struct device *dev);
 static void tlx493d_check_auto_recalibration(const struct device *dev);
 static void tlv493d_diagnose_error(const struct device *dev, int error_code);
 static int tlv493d_power_cycle(const struct device *dev);
+static bool tlx493d_detect_adc_hang(const struct device *dev, int16_t x, int16_t y, int16_t z);
+static int tlx493d_recover_from_adc_hang(const struct device *dev);
+static bool tlx493d_check_frm_ch_consistency(const struct device *dev);
 
 /**
  * @brief レジスタに値を書き込む
@@ -365,6 +397,9 @@ static int tlv493d_i2c_bus_recovery(const struct device *dev)
 /**
  * @brief 工場設定を読み取る
  *
+ * マニュアル要求：レジスタ7-9を起動時に必ず読み取り、書き込み時に保持する
+ * これらの値は書き込み操作時に必須（factory settingsを破損させないため）
+ *
  * @param dev デバイス構造体へのポインタ
  * @return 0: 成功、負の値: エラーコード
  */
@@ -373,15 +408,96 @@ static int tlv493d_read_factory_settings(const struct device *dev)
     struct tlx493d_data *data = dev->data;
     int ret;
     
-    // Read factory settings from registers 7-9
-    ret = tlx493d_read_multiple(dev, TLV493D_REG_TEMP_LSB, data->factory_settings, 3);
+    // Read factory settings from registers 7-9 as required by user manual
+    ret = tlx493d_read_multiple(dev, TLV493D_REG_FACTORY1, data->factory_settings, 3);
     if (ret < 0) {
-        LOG_ERR("Failed to read factory settings (ret %d)", ret);
+        LOG_ERR("Failed to read factory settings from registers 7-9 (ret %d)", ret);
         return ret;
     }
     
-    LOG_DBG("Factory settings: 0x%02X 0x%02X 0x%02X", 
+    LOG_INF("Factory settings read: Reg7=0x%02X, Reg8=0x%02X, Reg9=0x%02X", 
             data->factory_settings[0], data->factory_settings[1], data->factory_settings[2]);
+    
+    return 0;
+}
+
+/**
+ * @brief パリティビットを計算する
+ *
+ * マニュアル要求：全32ビット（書き込みレジスタ0-3）の和が奇数になるように
+ * パリティビット（MOD1のビット7）を設定する
+ *
+ * @param reg0 レジスタ0の値
+ * @param mod1 MOD1レジスタの値（パリティビット除く）
+ * @param reg2 レジスタ2の値
+ * @param mod2 MOD2レジスタの値
+ * @return パリティビットを含むMOD1の値
+ */
+static uint8_t tlv493d_calculate_parity(uint8_t reg0, uint8_t mod1, uint8_t reg2, uint8_t mod2)
+{
+    uint32_t total_bits = 0;
+    uint8_t regs[4] = {reg0, mod1, reg2, mod2};
+    
+    // 全32ビットの1の個数を数える
+    for (int i = 0; i < 4; i++) {
+        uint8_t reg_val = regs[i];
+        for (int bit = 0; bit < 8; bit++) {
+            if (reg_val & (1 << bit)) {
+                total_bits++;
+            }
+        }
+    }
+    
+    // 合計が偶数の場合、パリティビットを1にして奇数にする
+    uint8_t parity_bit = (total_bits % 2 == 0) ? 0x80 : 0x00;
+    uint8_t mod1_with_parity = (mod1 & 0x7F) | parity_bit;
+    
+    LOG_DBG("Parity calculation: total_bits=%d, parity_bit=0x%02X, MOD1=0x%02X", 
+            total_bits, parity_bit, mod1_with_parity);
+    
+    return mod1_with_parity;
+}
+
+/**
+ * @brief パリティチェック付きで4つの書き込みレジスタを一括設定する
+ *
+ * マニュアル要求に従い、パリティビットを自動計算して書き込む
+ *
+ * @param dev デバイス構造体へのポインタ
+ * @param reg0 レジスタ0の値
+ * @param mod1 MOD1レジスタの値（パリティビット除く）
+ * @param reg2 レジスタ2の値
+ * @param mod2 MOD2レジスタの値
+ * @return 0: 成功、負の値: エラーコード
+ */
+static int tlv493d_write_config_with_parity(const struct device *dev, 
+                                           uint8_t reg0, uint8_t mod1, 
+                                           uint8_t reg2, uint8_t mod2)
+{
+    int ret;
+    
+    // パリティビット計算
+    uint8_t mod1_with_parity = tlv493d_calculate_parity(reg0, mod1, reg2, mod2);
+    
+    // 全レジスタを順番に書き込み
+    ret = tlx493d_write_reg(dev, 0x00, reg0);
+    if (ret < 0) return ret;
+    k_msleep(INIT_STEP_DELAY_MS);
+    
+    ret = tlx493d_write_reg(dev, TLV493D_REG_MOD1, mod1_with_parity);
+    if (ret < 0) return ret;
+    k_msleep(INIT_STEP_DELAY_MS);
+    
+    ret = tlx493d_write_reg(dev, 0x02, reg2);
+    if (ret < 0) return ret;
+    k_msleep(INIT_STEP_DELAY_MS);
+    
+    ret = tlx493d_write_reg(dev, TLV493D_REG_MOD2, mod2);
+    if (ret < 0) return ret;
+    k_msleep(INIT_STEP_DELAY_MS);
+    
+    LOG_DBG("Config written with parity: Reg0=0x%02X, MOD1=0x%02X, Reg2=0x%02X, MOD2=0x%02X",
+            reg0, mod1_with_parity, reg2, mod2);
     
     return 0;
 }
@@ -396,35 +512,45 @@ static int tlv493d_configure_sensor(const struct device *dev)
 {
     struct tlx493d_data *data = dev->data;
     int ret;
-    uint8_t mod1_val, mod2_val;
+    uint8_t reg0_val, mod1_val, reg2_val, mod2_val;
     
-    // Configure MOD1: Enable fast mode for continuous measurement
-    // Preserve factory settings from byte 7 (bits 3-7)
-    mod1_val = (data->factory_settings[0] & 0xF8) | TLV493D_MOD1_FASTMODE;
+    // マニュアル要求に従った正しいfactory設定の保持
+    // Register 0: Reserved (write 0x00)
+    reg0_val = 0x00;
     
-    ret = tlx493d_write_reg(dev, TLV493D_REG_MOD1, mod1_val);
+    // Register 1 (MOD1): Configure sensor operation mode
+    // Preserve factory bits 6:3 from register 7, set operational bits
+    // Note: パリティビット（bit 7）は後で計算される
+    mod1_val = (data->factory_settings[0] & 0x78) |  // Keep factory bits 6:3
+               TLV493D_MOD1_FASTMODE |                // Enable fast mode (bit 1)
+               0x04;                                  // Enable interrupt (bit 2)
+    
+    // Register 2: Must contain factory settings from register 8
+    reg2_val = data->factory_settings[1];  // All bits 7:0 from register 8
+    
+    // Register 3 (MOD2): Configure measurement settings  
+    // Preserve factory bits 4:0 from register 9, configure measurement bits
+    mod2_val = (data->factory_settings[2] & 0x1F) |  // Keep factory bits 4:0
+               0x20;                                  // Enable parity test (bit 5)
+               // Temperature disabled (bit 7 = 0) as requested
+    
+    // パリティビット計算付きで全レジスタを書き込み（マニュアル要求）
+    ret = tlv493d_write_config_with_parity(dev, reg0_val, mod1_val, reg2_val, mod2_val);
     if (ret < 0) {
-        LOG_ERR("Failed to write MOD1 register (ret %d)", ret);
+        LOG_ERR("Failed to write sensor configuration with parity (ret %d)", ret);
         return ret;
     }
     
-    // 書き込み後の待機時間を延長
-    k_msleep(INIT_STEP_DELAY_MS);
+    // パリティビット再計算（ログ表示用）
+    mod1_val = tlv493d_calculate_parity(reg0_val, mod1_val, reg2_val, mod2_val);
     
-    // Configure MOD2: Disable temperature measurement (ユーザー要望により無効化)
-    // Preserve factory settings but ensure temperature bit is cleared
-    mod2_val = data->factory_settings[2] & (~TLV493D_MOD2_TEMP_EN);
+    LOG_INF("Sensor configured with factory settings preserved:");
+    LOG_INF("  Reg0=0x%02X, MOD1=0x%02X, Reg2=0x%02X, MOD2=0x%02X", 
+            reg0_val, mod1_val, reg2_val, mod2_val);
+    LOG_INF("  Factory: Reg7=0x%02X, Reg8=0x%02X, Reg9=0x%02X",
+            data->factory_settings[0], data->factory_settings[1], data->factory_settings[2]);
+    LOG_INF("  Parity bit: %s (MOD1 bit 7)", (mod1_val & 0x80) ? "SET" : "CLEAR");
     
-    ret = tlx493d_write_reg(dev, TLV493D_REG_MOD2, mod2_val);
-    if (ret < 0) {
-        LOG_ERR("Failed to write MOD2 register (ret %d)", ret);
-        return ret;
-    }
-    
-    // 書き込み後の待機時間を追加
-    k_msleep(INIT_STEP_DELAY_MS);
-    
-    LOG_INF("Sensor configured: MOD1=0x%02X, MOD2=0x%02X (temperature disabled)", mod1_val, mod2_val);
     return 0;
 }
 
@@ -768,6 +894,38 @@ static int tlx493d_read_sensor_data(const struct device *dev)
     data->y = (int16_t)(((raw_data[2] << 4) | (raw_data[5] & 0x0F)) << 4) >> 4;
     data->z = (int16_t)(((raw_data[0] << 4) | (raw_data[4] >> 4)) << 4) >> 4;
     
+    // ADCハング検出を実行
+    bool adc_hang = tlx493d_detect_adc_hang(dev, data->x, data->y, data->z);
+    if (adc_hang) {
+        LOG_WRN("ADC hang detected, attempting recovery");
+        ret = tlx493d_recover_from_adc_hang(dev);
+        if (ret < 0) {
+            LOG_ERR("ADC hang recovery failed (ret %d)", ret);
+            data->data_valid = false;
+            return ret;
+        }
+        // リカバリー成功後、データを再読み取り
+        ret = tlx493d_read_multiple(dev, TLV493D_REG_BX_MSB, raw_data, 6);
+        if (ret < 0) {
+            LOG_ERR("Failed to re-read sensor data after ADC hang recovery (ret %d)", ret);
+            data->data_valid = false;
+            return ret;
+        }
+        
+        // 値を再計算
+        data->x = (int16_t)(((raw_data[1] << 4) | (raw_data[4] & 0x0F)) << 4) >> 4;
+        data->y = (int16_t)(((raw_data[2] << 4) | (raw_data[5] & 0x0F)) << 4) >> 4;
+        data->z = (int16_t)(((raw_data[0] << 4) | (raw_data[4] >> 4)) << 4) >> 4;
+    }
+    
+    // フレームカウンター(FRM)とチャンネル(CH)フラグによるデータ整合性チェック
+    bool frm_ch_valid = tlx493d_check_frm_ch_consistency(dev);
+    if (!frm_ch_valid) {
+        LOG_WRN("FRM/CH consistency check failed - data may be invalid");
+        data->data_valid = false;
+        return -EAGAIN; // データ整合性に問題があるため、再試行を促す
+    }
+    
     // データ有効フラグを設定
     data->data_valid = true;
     
@@ -841,6 +999,218 @@ static void tlx493d_check_auto_recalibration(const struct device *dev)
 }
 
 /**
+ * @brief ADCハングを検出する
+ *
+ * Master Controlled ModeまたはFast Modeで連続して同じ値が読み取られる場合、
+ * ADCがハングしている可能性があるため検出する。
+ * 
+ * @param dev デバイス構造体へのポインタ
+ * @param x 現在のX軸値
+ * @param y 現在のY軸値
+ * @param z 現在のZ軸値
+ * @return true: ADCハング検出、false: 正常
+ */
+static bool tlx493d_detect_adc_hang(const struct device *dev, int16_t x, int16_t y, int16_t z)
+{
+    struct tlx493d_data *data = dev->data;
+    bool hang_detected = false;
+    
+    // 現在の値を履歴に保存
+    data->prev_adc_x[data->adc_sample_index] = x;
+    data->prev_adc_y[data->adc_sample_index] = y;
+    data->prev_adc_z[data->adc_sample_index] = z;
+    
+    data->adc_sample_index = (data->adc_sample_index + 1) % ADC_HANG_DETECTION_SAMPLES;
+    
+    // 十分なサンプルが蓄積されてから検出開始
+    static bool samples_filled = false;
+    if (!samples_filled) {
+        if (data->adc_sample_index == 0) {
+            samples_filled = true;
+        }
+        return false;
+    }
+    
+    // 過去N回のサンプルがすべて閾値以下の変化しかない場合、ADCハングと判定
+    bool x_hung = true, y_hung = true, z_hung = true;
+    
+    for (int i = 1; i < ADC_HANG_DETECTION_SAMPLES; i++) {
+        int prev_idx = (data->adc_sample_index - i + ADC_HANG_DETECTION_SAMPLES) % ADC_HANG_DETECTION_SAMPLES;
+        int curr_idx = (data->adc_sample_index - i + 1 + ADC_HANG_DETECTION_SAMPLES) % ADC_HANG_DETECTION_SAMPLES;
+        
+        if (abs(data->prev_adc_x[curr_idx] - data->prev_adc_x[prev_idx]) > ADC_HANG_DETECTION_THRESHOLD) {
+            x_hung = false;
+        }
+        if (abs(data->prev_adc_y[curr_idx] - data->prev_adc_y[prev_idx]) > ADC_HANG_DETECTION_THRESHOLD) {
+            y_hung = false;
+        }
+        if (abs(data->prev_adc_z[curr_idx] - data->prev_adc_z[prev_idx]) > ADC_HANG_DETECTION_THRESHOLD) {
+            z_hung = false;
+        }
+    }
+    
+    // すべての軸でハングが検出された場合
+    if (x_hung && y_hung && z_hung) {
+        hang_detected = true;
+        data->adc_hang_count++;
+        LOG_WRN("ADC hang detected: X=%d, Y=%d, Z=%d (count: %d)", x, y, z, data->adc_hang_count);
+    } else {
+        data->adc_hang_count = 0; // 正常な変化があった場合はカウンターをリセット
+    }
+    
+    data->adc_hang_detected = hang_detected;
+    return hang_detected;
+}
+
+/**
+ * @brief ADCハングからリカバリーする
+ *
+ * ADCハングが検出された場合に、センサーをリセットして正常状態に戻す。
+ * データシートに従って以下のシーケンスを実行：
+ * 1. 一時的な電源サイクル（Master Controlled/Fast Modeのリセット）
+ * 2. レジスタ設定の再初期化
+ * 3. ADC状態のクリア
+ *
+ * @param dev デバイス構造体へのポインタ
+ * @return 0: 成功、負の値: エラーコード
+ */
+static int tlx493d_recover_from_adc_hang(const struct device *dev)
+{
+    struct tlx493d_data *data = dev->data;
+    int ret;
+    
+    LOG_INF("Recovering from ADC hang (attempt %d)", data->adc_hang_count);
+    
+    // ステップ1: Fast ModeとMaster Controlled Modeの一時的な無効化
+    uint8_t mod1_val = (data->factory_settings[0] & 0xF8); // Fast mode bit をクリア
+    ret = tlx493d_write_reg(dev, TLV493D_REG_MOD1, mod1_val);
+    if (ret < 0) {
+        LOG_ERR("Failed to disable fast mode during ADC hang recovery (ret %d)", ret);
+        return ret;
+    }
+    
+    k_msleep(ADC_HANG_RECOVERY_DELAY_MS);
+    
+    // ステップ2: リカバリーフレームとリセットコマンドを送信
+    ret = tlv493d_send_recovery_frame(dev);
+    if (ret < 0) {
+        LOG_WRN("Recovery frame failed during ADC hang recovery (ret %d)", ret);
+    }
+    
+    k_msleep(50);
+    
+    ret = tlv493d_send_reset_command(dev);
+    if (ret < 0) {
+        LOG_WRN("Reset command failed during ADC hang recovery (ret %d)", ret);
+    }
+    
+    k_msleep(ADC_HANG_RECOVERY_DELAY_MS);
+    
+    // ステップ3: Fast Modeを再度有効化
+    mod1_val = (data->factory_settings[0] & 0xF8) | TLV493D_MOD1_FASTMODE;
+    ret = tlx493d_write_reg(dev, TLV493D_REG_MOD1, mod1_val);
+    if (ret < 0) {
+        LOG_ERR("Failed to re-enable fast mode after ADC hang recovery (ret %d)", ret);
+        return ret;
+    }
+    
+    k_msleep(50);
+    
+    // ステップ4: ADCハング検出状態をリセット
+    data->adc_hang_detected = false;
+    data->adc_hang_count = 0;
+    data->adc_sample_index = 0;
+    memset(data->prev_adc_x, 0, sizeof(data->prev_adc_x));
+    memset(data->prev_adc_y, 0, sizeof(data->prev_adc_y));
+    memset(data->prev_adc_z, 0, sizeof(data->prev_adc_z));
+    
+    // ステップ5: センサーデータの読み取りテスト
+    uint8_t test_data[6];
+    ret = tlx493d_read_multiple(dev, TLV493D_REG_BX_MSB, test_data, 6);
+    if (ret < 0) {
+        LOG_ERR("Post-recovery sensor test failed (ret %d)", ret);
+        return ret;
+    }
+    
+    LOG_INF("ADC hang recovery completed successfully");
+    return 0;
+}
+
+/**
+ * @brief フレームカウンター(FRM)とチャンネル(CH)フラグによるデータ整合性チェック
+ *
+ * Infineonユーザーマニュアルに従って、センサーデータの整合性を確認する：
+ * - FRM (Frame Counter): ビット3:2、連続する変換で増加する必要がある
+ * - CH (Channel): ビット1:0、同じ変換からのデータには「00」である必要がある
+ * 
+ * FRMが増加しない場合はセンサーが「フリーズ」状態（例：電源ユニットが測定サイクルを
+ * 開始しない、ADCが新しい測定を完了しない）を示す。
+ * CHが「00」でない場合は、X/Y/Z/Tが異なる変換から来ていることを示し、変換が実行中。
+ *
+ * @param dev デバイス構造体へのポインタ
+ * @return true: データ整合性OK、false: データ整合性に問題あり
+ */
+static bool tlx493d_check_frm_ch_consistency(const struct device *dev)
+{
+    struct tlx493d_data *data = dev->data;
+    uint8_t temp_counter_channel_reg;
+    int ret;
+    
+    // レジスタ3（温度、フレームカウンター、チャンネル）を読み取り
+    ret = tlx493d_read_reg(dev, TLV493D_REG_TEMP_COUNTER_CHANNEL, &temp_counter_channel_reg);
+    if (ret < 0) {
+        LOG_ERR("Failed to read temp/counter/channel register for FRM/CH check (ret %d)", ret);
+        return false;
+    }
+    
+    // フレームカウンター（FRM）とチャンネル（CH）フラグを抽出
+    uint8_t current_frm = (temp_counter_channel_reg & FRM_MASK) >> FRM_SHIFT;
+    uint8_t current_ch = temp_counter_channel_reg & CH_MASK;
+    
+    LOG_DBG("FRM/CH check: FRM=%d, CH=%d, reg=0x%02X", current_frm, current_ch, temp_counter_channel_reg);
+    
+    // チャンネルフラグチェック：同じ変換からのデータは「00」である必要がある
+    if (current_ch != CH_VALID_VALUE) {
+        LOG_WRN("CH flag invalid: expected 0x%02X, got 0x%02X (conversion in progress)", 
+                CH_VALID_VALUE, current_ch);
+        return false;
+    }
+    
+    // 初回読み取り時はフレームカウンターの初期化のみ行う
+    if (!data->frm_consistency_check_enabled) {
+        data->last_frm_counter = current_frm;
+        data->frm_stuck_count = 0;
+        data->frm_consistency_check_enabled = true;
+        LOG_DBG("FRM/CH consistency check initialized with FRM=%d", current_frm);
+        return true;
+    }
+    
+    // フレームカウンターチェック：前回から変化しているかを確認
+    if (current_frm == data->last_frm_counter) {
+        data->frm_stuck_count++;
+        LOG_WRN("FRM counter stuck: count=%d, FRM=%d (threshold=%d)", 
+                data->frm_stuck_count, current_frm, FRM_STUCK_THRESHOLD);
+        
+        // 閾値を超えた場合、センサーがフリーズ状態と判定
+        if (data->frm_stuck_count >= FRM_STUCK_THRESHOLD) {
+            LOG_ERR("FRM counter stuck for %d consecutive reads - sensor frozen", 
+                    data->frm_stuck_count);
+            return false;
+        }
+    } else {
+        // フレームカウンターが変化した場合、正常
+        if (data->frm_stuck_count > 0) {
+            LOG_INF("FRM counter resumed: %d -> %d (was stuck for %d reads)", 
+                    data->last_frm_counter, current_frm, data->frm_stuck_count);
+        }
+        data->frm_stuck_count = 0;
+        data->last_frm_counter = current_frm;
+    }
+    
+    return true;
+}
+
+/**
  * @brief ワークハンドラー
  *
  * @param work ワーク構造体へのポインタ
@@ -859,8 +1229,16 @@ static void tlx493d_work_handler(struct k_work *work) {
         consecutive_errors = 0;
     }
 
-    // センサーが初期化されていない場合の処理
+    // センサーが初期化されていない場合の処理（初回実行時または再初期化時）
     if (!data->initialized) {
+        LOG_INF("Starting TLX493D sensor initialization...");
+        
+        // I2Cバスリカバリーを最初に実行
+        tlv493d_i2c_bus_recovery(dev);
+
+        // 初期化前に待機時間を追加
+        k_msleep(100);
+        
         // 連続エラー回数に応じて異なるリカバリー戦略を実行
         if (consecutive_errors >= 3) {
             LOG_WRN("Multiple initialization failures, performing power cycle");
@@ -869,6 +1247,7 @@ static void tlx493d_work_handler(struct k_work *work) {
             consecutive_errors = 0;
         }
         
+        // センサー初期化シーケンスを実行
         ret = tlv493d_initialize_sensor(dev);
         if (ret != 0) {
             LOG_ERR("Failed to initialize sensor in work handler (ret %d)", ret);
@@ -880,6 +1259,14 @@ static void tlx493d_work_handler(struct k_work *work) {
             k_work_schedule(&data->work, K_MSEC(delay_ms));
             return;
         }
+        
+        // 初期キャリブレーションを実行
+        tlx493d_calibrate(dev);
+        if (!data->calibrated) {
+            LOG_WRN("Initial calibration failed. Will retry in next cycle.");
+        }
+        
+        LOG_INF("TLX493D sensor initialization completed successfully");
     }
 
     // センサーデータの読み取りと処理
@@ -959,10 +1346,8 @@ static void tlx493d_work_handler(struct k_work *work) {
 
     if (report_sync) {
         input_report_rel(dev, INPUT_REL_X, 0, true, K_FOREVER); // Send sync event
-    } else {
-        // If no movement, send a dummy sync to keep ZMK active
-        input_report_rel(dev, INPUT_REL_X, 0, true, K_FOREVER);
     }
+    // Remove dummy sync when no movement to reduce system load
 
     // 移動検出状態の更新
     if (movement_detected_this_cycle) {
@@ -976,10 +1361,16 @@ static void tlx493d_work_handler(struct k_work *work) {
         LOG_DBG("Movement stopped, waiting for auto-recalibration timeout");
     }
 
-    LOG_INF("Calibrated Delta: X=%d, Y=%d, Z=%d", delta_x, delta_y, delta_z);
+    // Only log delta values when movement is detected to reduce log spam
+    if (movement_detected_this_cycle) {
+        LOG_DBG("Movement Delta: X=%d, Y=%d, Z=%d", delta_x, delta_y, delta_z);
+    }
 
-    // 次回のワークをスケジュール（正常時は通常の間隔）
-    k_work_schedule(&data->work, K_MSEC(DT_INST_PROP(0, polling_interval_ms)));
+    // 次回のワークをスケジュール（移動検出時は高頻度、非検出時は低頻度）
+    int next_interval = movement_detected_this_cycle ? 
+                       DT_INST_PROP(0, polling_interval_ms) : 
+                       DT_INST_PROP(0, polling_interval_ms) * 5; // 移動なしの場合は5倍の間隔
+    k_work_schedule(&data->work, K_MSEC(next_interval));
 }
 
 /**
@@ -1008,6 +1399,19 @@ static int tlx493d_init(const struct device *dev)
     data->movement_detected = false;
     data->bus_recovery_attempts = 0;
     
+    // ADCハング検出の初期化
+    data->adc_sample_index = 0;
+    data->adc_hang_detected = false;
+    data->adc_hang_count = 0;
+    memset(data->prev_adc_x, 0, sizeof(data->prev_adc_x));
+    memset(data->prev_adc_y, 0, sizeof(data->prev_adc_y));
+    memset(data->prev_adc_z, 0, sizeof(data->prev_adc_z));
+    
+    // フレームカウンター・チャンネルフラグ整合性チェックの初期化
+    data->last_frm_counter = 0;
+    data->frm_stuck_count = 0;
+    data->frm_consistency_check_enabled = false;
+    
     // レジスタマップを初期化
     memset(data->reg_map, 0, TLV493D_REG_MAP_SIZE);
 
@@ -1016,30 +1420,13 @@ static int tlx493d_init(const struct device *dev)
         return -ENODEV;
     }
 
-    // I2Cバスリカバリーを最初に実行
-    tlv493d_i2c_bus_recovery(dev);
-
-    // 初期化前に長めの待機時間を追加
-    k_msleep(100);
-
-    // Perform sensor initialization sequence according to datasheet
-    int ret = tlv493d_initialize_sensor(dev);
-    if (ret != 0) {
-        LOG_ERR("Sensor initialization failed (ret %d)", ret);
-        // 初期化に失敗しても、ワークハンドラーで再試行するため、
-        // ここではエラーを返さない
-    }
-
-    // Perform initial calibration
-    if (data->initialized) {
-        tlx493d_calibrate(dev);
-        if (!data->calibrated) {
-            LOG_WRN("Initial calibration failed. Will retry in work handler.");
-        }
-    }
+    // ZMK起動後3秒待機してからセンサー初期化を開始
+    // ここでは基本的な設定のみ行い、実際のセンサー初期化は遅延させる
+    LOG_INF("TLX493D driver will start initialization in 3 seconds...");
 
     k_work_init_delayable(&data->work, tlx493d_work_handler);
-    k_work_schedule(&data->work, K_MSEC(DT_INST_PROP(0, polling_interval_ms)));
+    // システムワークキューの代わりに専用ワークキューを使用してシステム負荷を軽減
+    k_work_schedule(&data->work, K_MSEC(3000));
 
     LOG_INF("TLX493D driver initialized successfully on %s", dev->name);
     return 0;

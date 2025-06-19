@@ -1,1 +1,5 @@
 sample/
+.clang-format
+build/
+.vscode/settings.json
+CLAUDE.md
