@@ -62,13 +62,13 @@ LOG_MODULE_REGISTER(tlx493d, CONFIG_INPUT_LOG_LEVEL);
 #define MAX_INIT_RETRIES 3
 
 // I2C通信タイムアウト (ms)
-#define I2C_TIMEOUT_MS 100
+#define I2C_TIMEOUT_MS 50
 
 // 初期化ステップ間の待機時間 (ms) - 増加
-#define INIT_STEP_DELAY_MS 50  // 20msから50msに増加
+#define INIT_STEP_DELAY_MS 20  // 20msから50msに増加
 
 // リセット後の待機時間 (ms) - 増加
-#define RESET_DELAY_MS 100  // 50msから100msに増加
+#define RESET_DELAY_MS 70  // 50msから100msに増加
 
 // 自動キャリブレーションのための無移動時間閾値 (ms)
 #define AUTO_RECALIBRATION_TIMEOUT_MS 3000  // 30秒
@@ -79,7 +79,7 @@ LOG_MODULE_REGISTER(tlx493d, CONFIG_INPUT_LOG_LEVEL);
 // ADCハング検出設定
 #define ADC_HANG_DETECTION_SAMPLES 5  // 連続して同じ値の検出回数
 #define ADC_HANG_DETECTION_THRESHOLD 2  // 最小変化量（ハング判定しない変化量）
-#define ADC_HANG_RECOVERY_DELAY_MS 100  // ADCハング検出後の待機時間
+#define ADC_HANG_RECOVERY_DELAY_MS 30  // ADCハング検出後の待機時間
 
 // フレームカウンターとチャンネルフラグ整合性チェック設定
 #define TLV493D_REG_TEMP_COUNTER_CHANNEL 0x03  // 温度、フレームカウンター、チャンネルレジスタ
@@ -90,8 +90,8 @@ LOG_MODULE_REGISTER(tlx493d, CONFIG_INPUT_LOG_LEVEL);
 #define FRM_STUCK_THRESHOLD 3  // フレームカウンターが動かない許容回数
 
 // Power management states
-#define TLV493D_POWER_DOWN_DELAY_MS 100
-#define TLV493D_POWER_UP_DELAY_MS   200
+#define TLV493D_POWER_DOWN_DELAY_MS 10
+#define TLV493D_POWER_UP_DELAY_MS   20
 #define TLV493D_RESET_SEQUENCE_DELAY_MS 50
 
 // Additional recovery commands
@@ -115,6 +115,7 @@ struct tlx493d_data {
     bool calibrated;
     struct k_work_delayable work;
     uint8_t factory_settings[3];  // Store bytes 7-9 for write operations
+    uint8_t config_regs[4];       // Configuration registers 0-3 for write operations
     bool initialized;
     uint32_t log_counter;
     bool movement_active_x; // Hysteresis state for X
@@ -154,6 +155,7 @@ static int tlv493d_read_factory_settings(const struct device *dev);
 static int tlv493d_configure_sensor(const struct device *dev);
 static int tlv493d_diagnose(const struct device *dev);
 static int tlv493d_initialize_sensor(const struct device *dev);
+static int tlv493d_write_block(const struct device *dev, uint8_t start_addr, uint8_t *data, uint8_t len);
 static int tlx493d_read_sensor_data(const struct device *dev);
 static void tlx493d_calibrate(const struct device *dev);
 static bool tlx493d_has_valid_data(const struct device *dev);
@@ -253,6 +255,44 @@ static int tlx493d_read_multiple(const struct device *dev, uint8_t start_addr, u
 }
 
 /**
+ * @brief ブロックデータを書き込む（Raspberry Piフォーラムの解決方法に基づく）
+ * 
+ * @param dev デバイス構造体へのポインタ
+ * @param start_addr 開始レジスタアドレス
+ * @param data 書き込むデータのポインタ
+ * @param len 書き込むデータの長さ
+ * @return 0: 成功、負の値: エラーコード
+ */
+static int tlv493d_write_block(const struct device *dev, uint8_t start_addr, uint8_t *data, uint8_t len)
+{
+    const struct tlx493d_config *config = dev->config;
+    struct tlx493d_data *dev_data = dev->data;
+    uint8_t buf[16]; // 最大16バイトのブロック書き込みをサポート
+    int ret;
+
+    if (len > 15) { // start_addr用に1バイト予約
+        LOG_ERR("Block write length too large: %d", len);
+        return -EINVAL;
+    }
+
+    buf[0] = start_addr;
+    memcpy(&buf[1], data, len);
+
+    ret = i2c_write_dt(&config->i2c, buf, len + 1);
+    if (ret == 0) {
+        // レジスタマップを更新
+        for (int i = 0; i < len && (start_addr + i) < TLV493D_REG_MAP_SIZE; i++) {
+            dev_data->reg_map[start_addr + i] = data[i];
+        }
+        LOG_DBG("Block write successful: addr=0x%02X, len=%d", start_addr, len);
+    } else {
+        LOG_ERR("Block write failed: addr=0x%02X, len=%d, ret=%d", start_addr, len, ret);
+        tlv493d_diagnose_error(dev, ret);
+    }
+    return ret;
+}
+
+/**
  * @brief エラーの詳細診断を行う
  *
  * @param dev デバイス構造体へのポインタ
@@ -303,7 +343,7 @@ static int tlv493d_send_recovery_frame(const struct device *dev)
 }
 
 /**
- * @brief リセットコマンドを送信する
+ * @brief リセットコマンドを送信する（公式ライブラリ準拠）
  *
  * @param dev デバイス構造体へのポインタ
  * @return 0: 成功、負の値: エラーコード
@@ -311,10 +351,10 @@ static int tlv493d_send_recovery_frame(const struct device *dev)
 static int tlv493d_send_reset_command(const struct device *dev)
 {
     const struct tlx493d_config *config = dev->config;
-    uint8_t reset_cmd = TLV493D_RESET_CMD;
+    uint8_t reset_cmd = TLV493D_RECOVERY_CMD;
     int ret;
     
-    LOG_DBG("Sending reset command");
+    LOG_DBG("Sending recovery reset frame");
     ret = i2c_write_dt(&config->i2c, &reset_cmd, 1);
     if (ret < 0) {
         tlv493d_diagnose_error(dev, ret);
@@ -367,7 +407,6 @@ static int tlv493d_i2c_bus_recovery(const struct device *dev)
         }
         k_msleep(20); // 各送信間の短い待機
     }
-    k_msleep(50); // 追加の待機時間
 
     // 3. リセットコマンド(0x00)を送信
     ret = tlv493d_send_reset_command(dev);
@@ -421,86 +460,6 @@ static int tlv493d_read_factory_settings(const struct device *dev)
     return 0;
 }
 
-/**
- * @brief パリティビットを計算する
- *
- * マニュアル要求：全32ビット（書き込みレジスタ0-3）の和が奇数になるように
- * パリティビット（MOD1のビット7）を設定する
- *
- * @param reg0 レジスタ0の値
- * @param mod1 MOD1レジスタの値（パリティビット除く）
- * @param reg2 レジスタ2の値
- * @param mod2 MOD2レジスタの値
- * @return パリティビットを含むMOD1の値
- */
-static uint8_t tlv493d_calculate_parity(uint8_t reg0, uint8_t mod1, uint8_t reg2, uint8_t mod2)
-{
-    uint32_t total_bits = 0;
-    uint8_t regs[4] = {reg0, mod1, reg2, mod2};
-    
-    // 全32ビットの1の個数を数える
-    for (int i = 0; i < 4; i++) {
-        uint8_t reg_val = regs[i];
-        for (int bit = 0; bit < 8; bit++) {
-            if (reg_val & (1 << bit)) {
-                total_bits++;
-            }
-        }
-    }
-    
-    // 合計が偶数の場合、パリティビットを1にして奇数にする
-    uint8_t parity_bit = (total_bits % 2 == 0) ? 0x80 : 0x00;
-    uint8_t mod1_with_parity = (mod1 & 0x7F) | parity_bit;
-    
-    LOG_DBG("Parity calculation: total_bits=%d, parity_bit=0x%02X, MOD1=0x%02X", 
-            total_bits, parity_bit, mod1_with_parity);
-    
-    return mod1_with_parity;
-}
-
-/**
- * @brief パリティチェック付きで4つの書き込みレジスタを一括設定する
- *
- * マニュアル要求に従い、パリティビットを自動計算して書き込む
- *
- * @param dev デバイス構造体へのポインタ
- * @param reg0 レジスタ0の値
- * @param mod1 MOD1レジスタの値（パリティビット除く）
- * @param reg2 レジスタ2の値
- * @param mod2 MOD2レジスタの値
- * @return 0: 成功、負の値: エラーコード
- */
-static int tlv493d_write_config_with_parity(const struct device *dev, 
-                                           uint8_t reg0, uint8_t mod1, 
-                                           uint8_t reg2, uint8_t mod2)
-{
-    int ret;
-    
-    // パリティビット計算
-    uint8_t mod1_with_parity = tlv493d_calculate_parity(reg0, mod1, reg2, mod2);
-    
-    // 全レジスタを順番に書き込み
-    ret = tlx493d_write_reg(dev, 0x00, reg0);
-    if (ret < 0) return ret;
-    k_msleep(INIT_STEP_DELAY_MS);
-    
-    ret = tlx493d_write_reg(dev, TLV493D_REG_MOD1, mod1_with_parity);
-    if (ret < 0) return ret;
-    k_msleep(INIT_STEP_DELAY_MS);
-    
-    ret = tlx493d_write_reg(dev, 0x02, reg2);
-    if (ret < 0) return ret;
-    k_msleep(INIT_STEP_DELAY_MS);
-    
-    ret = tlx493d_write_reg(dev, TLV493D_REG_MOD2, mod2);
-    if (ret < 0) return ret;
-    k_msleep(INIT_STEP_DELAY_MS);
-    
-    LOG_DBG("Config written with parity: Reg0=0x%02X, MOD1=0x%02X, Reg2=0x%02X, MOD2=0x%02X",
-            reg0, mod1_with_parity, reg2, mod2);
-    
-    return 0;
-}
 
 /**
  * @brief センサーを設定する
@@ -508,48 +467,102 @@ static int tlv493d_write_config_with_parity(const struct device *dev,
  * @param dev デバイス構造体へのポインタ
  * @return 0: 成功、負の値: エラーコード
  */
+/**
+ * @brief パリティビットを計算する（公式ライブラリ準拠）
+ *
+ * @param value 計算対象の値
+ * @return パリティビット (0 or 1)
+ */
+static uint8_t tlv493d_calculate_parity(uint8_t value)
+{
+    uint8_t data = value;
+    data ^= data >> 4;
+    data ^= data >> 2;
+    data ^= data >> 1;
+    return data & 1U;
+}
+
+/**
+ * @brief 設定パリティを計算する（公式ライブラリ準拠）
+ *
+ * @param dev デバイス構造体へのポインタ
+ * @return 0: 成功、負の値: エラーコード
+ */
+static int tlv493d_calculate_configuration_parity(const struct device *dev)
+{
+    struct tlx493d_data *data = dev->data;
+    uint8_t result = 0x00;
+    uint8_t write_regs[4] = {0};
+    
+    // 書き込みレジスタ0-3を読み取り
+    write_regs[0] = 0x00;  // Register 0: reserved
+    write_regs[1] = (data->factory_settings[0] & 0x78) | TLV493D_MOD1_FASTMODE | 0x04; // MOD1: factory + fast + interrupt
+    write_regs[2] = data->factory_settings[1]; // Register 2: factory settings from reg 8
+    write_regs[3] = (data->factory_settings[2] & 0x1F) | 0x20; // MOD2: factory + parity test enabled, temp disabled
+    
+    // 最初にパリティビットをEVENに設定 (ビット7をクリア)
+    write_regs[1] &= 0x7F;
+    
+    // 全書き込みレジスタのXORを計算
+    for (int i = 0; i < 4; i++) {
+        result ^= write_regs[i];
+    }
+    
+    // パリティビットを計算してMOD1レジスタにセット
+    uint8_t parity_bit = tlv493d_calculate_parity(result);
+    if (parity_bit) {
+        write_regs[1] |= 0x80; // パリティビットをセット
+    }
+    
+    // 計算されたレジスタ値を保存
+    data->config_regs[0] = write_regs[0];
+    data->config_regs[1] = write_regs[1];
+    data->config_regs[2] = write_regs[2];
+    data->config_regs[3] = write_regs[3];
+    
+    LOG_DBG("Configuration parity calculated: Reg0=0x%02X, MOD1=0x%02X, Reg2=0x%02X, MOD2=0x%02X (parity=%d)",
+            write_regs[0], write_regs[1], write_regs[2], write_regs[3], parity_bit);
+    
+    return 0;
+}
+
 static int tlv493d_configure_sensor(const struct device *dev)
 {
     struct tlx493d_data *data = dev->data;
     int ret;
-    uint8_t reg0_val, mod1_val, reg2_val, mod2_val;
+
+    LOG_INF("Configuring sensor with official library sequence");
     
-    // マニュアル要求に従った正しいfactory設定の保持
-    // Register 0: Reserved (write 0x00)
-    reg0_val = 0x00;
-    
-    // Register 1 (MOD1): Configure sensor operation mode
-    // Preserve factory bits 6:3 from register 7, set operational bits
-    // Note: パリティビット（bit 7）は後で計算される
-    mod1_val = (data->factory_settings[0] & 0x78) |  // Keep factory bits 6:3
-               TLV493D_MOD1_FASTMODE |                // Enable fast mode (bit 1)
-               0x04;                                  // Enable interrupt (bit 2)
-    
-    // Register 2: Must contain factory settings from register 8
-    reg2_val = data->factory_settings[1];  // All bits 7:0 from register 8
-    
-    // Register 3 (MOD2): Configure measurement settings  
-    // Preserve factory bits 4:0 from register 9, configure measurement bits
-    mod2_val = (data->factory_settings[2] & 0x1F) |  // Keep factory bits 4:0
-               0x20;                                  // Enable parity test (bit 5)
-               // Temperature disabled (bit 7 = 0) as requested
-    
-    // パリティビット計算付きで全レジスタを書き込み（マニュアル要求）
-    ret = tlv493d_write_config_with_parity(dev, reg0_val, mod1_val, reg2_val, mod2_val);
+    // ステップ1: 全書き込みレジスタを0にクリア
+    uint8_t clear_regs[4] = {0x00, 0x00, 0x00, 0x00};
+    ret = tlv493d_write_block(dev, 0x00, clear_regs, 4);
     if (ret < 0) {
-        LOG_ERR("Failed to write sensor configuration with parity (ret %d)", ret);
+        LOG_ERR("Failed to clear write registers (ret %d)", ret);
         return ret;
     }
-    
-    // パリティビット再計算（ログ表示用）
-    mod1_val = tlv493d_calculate_parity(reg0_val, mod1_val, reg2_val, mod2_val);
-    
-    LOG_INF("Sensor configured with factory settings preserved:");
+    k_msleep(INIT_STEP_DELAY_MS);
+
+    // ステップ2: 工場設定から予約済みレジスタ値を設定
+    // ステップ3: パリティテストを有効化
+    // ステップ4: MASTERCONTROLLEDMODEを設定
+    // ステップ5: 設定パリティを計算
+    ret = tlv493d_calculate_configuration_parity(dev);
+    if (ret < 0) {
+        LOG_ERR("Failed to calculate configuration parity (ret %d)", ret);
+        return ret;
+    }
+
+    // ステップ6: 計算された設定を書き込み
+    ret = tlv493d_write_block(dev, 0x00, data->config_regs, 4);
+    if (ret < 0) {
+        LOG_ERR("Failed to write configuration registers (ret %d)", ret);
+        return ret;
+    }
+    k_msleep(INIT_STEP_DELAY_MS);
+
+    LOG_INF("Sensor configured successfully with official library method");
     LOG_INF("  Reg0=0x%02X, MOD1=0x%02X, Reg2=0x%02X, MOD2=0x%02X", 
-            reg0_val, mod1_val, reg2_val, mod2_val);
-    LOG_INF("  Factory: Reg7=0x%02X, Reg8=0x%02X, Reg9=0x%02X",
-            data->factory_settings[0], data->factory_settings[1], data->factory_settings[2]);
-    LOG_INF("  Parity bit: %s (MOD1 bit 7)", (mod1_val & 0x80) ? "SET" : "CLEAR");
+            data->config_regs[0], data->config_regs[1], data->config_regs[2], data->config_regs[3]);
     
     return 0;
 }
@@ -660,56 +673,45 @@ static int tlv493d_initialize_sensor(const struct device *dev)
     int retry_count = 0;
     const int max_init_attempts = MAX_INIT_RETRIES;
     
-    LOG_INF("Starting TLV493D sensor initialization sequence");
+    LOG_INF("Starting TLV493D sensor initialization sequence with Raspberry Pi fix");
     
-    // 初期化前に電源サイクルを実行
-    ret = tlv493d_power_cycle(dev);
-    if (ret < 0) {
-        LOG_WRN("Power cycle failed (ret %d), proceeding with initialization attempts.", ret);
-    }
+    // // 初期化前に電源サイクルを実行
+    // ret = tlv493d_power_cycle(dev);
+    // if (ret < 0) {
+    //     LOG_WRN("Power cycle failed (ret %d), proceeding with initialization attempts.", ret);
+    // }
     
-    k_msleep(200); // 電源サイクル後の十分な待機時間
+    k_msleep(10); // 電源サイクル後の十分な待機時間
     
     while (retry_count < max_init_attempts) {
         LOG_DBG("Initialization attempt %d/%d", retry_count + 1, max_init_attempts);
 
-        // Step 1: リカバリーフレームを複数回送信
-        for (int i = 0; i < 3; i++) {
-            ret = tlv493d_send_recovery_frame(dev);
-            if (ret < 0) {
-                LOG_WRN("Recovery frame %d failed (ret %d)", i + 1, ret);
-            }
-            k_msleep(INIT_STEP_DELAY_MS);
-        }
-        
-        // Step 2: リセットコマンドを複数回送信
-        for (int i = 0; i < 3; i++) {
-            ret = tlv493d_send_reset_command(dev);
-            if (ret < 0) {
-                LOG_WRN("Reset command %d failed (ret %d)", i + 1, ret);
-            }
-            k_msleep(RESET_DELAY_MS);
-        }
-        
-        // Step 3: I2C通信テスト
-        ret = tlx493d_read_reg(dev, TLV493D_REG_BX_MSB, &test_read);
-        if (ret < 0) {
-            LOG_WRN("I2C communication test failed during init (attempt %d, ret %d)", retry_count + 1, ret);
-            goto next_attempt; // 次の試行へ
-        }
-        
-        // Step 4: 工場設定の読み取り
+        // Step 1: 読み取りレジスタを読み取り（公式ライブラリ準拠）
         ret = tlv493d_read_factory_settings(dev);
         if (ret < 0) {
-            LOG_WRN("Failed to read factory settings during init (attempt %d, ret %d)", retry_count + 1, ret);
+            LOG_WRN("Failed to read registers during init (attempt %d, ret %d)", retry_count + 1, ret);
             goto next_attempt; // 次の試行へ
         }
-        k_msleep(INIT_STEP_DELAY_MS); // 待機時間を追加
+        k_msleep(INIT_STEP_DELAY_MS);
         
-        // Step 5: センサー設定
+        // Step 2: センサー設定（setDefaultConfig相当）
         ret = tlv493d_configure_sensor(dev);
         if (ret < 0) {
             LOG_WRN("Failed to configure sensor during init (attempt %d, ret %d)", retry_count + 1, ret);
+            goto next_attempt; // 次の試行へ
+        }
+        
+        // Step 3: 設定後にレジスタマップを再読み取り
+        ret = tlv493d_read_factory_settings(dev);
+        if (ret < 0) {
+            LOG_WRN("Failed to update register map after configuration (attempt %d, ret %d)", retry_count + 1, ret);
+            goto next_attempt; // 次の試行へ
+        }
+        
+        // Step 4: 基本的な通信テスト
+        ret = tlx493d_read_reg(dev, TLV493D_REG_BX_MSB, &test_read);
+        if (ret < 0) {
+            LOG_WRN("I2C communication test failed during init (attempt %d, ret %d)", retry_count + 1, ret);
             goto next_attempt; // 次の試行へ
         }
         
@@ -717,7 +719,7 @@ static int tlv493d_initialize_sensor(const struct device *dev)
         data->initialized = true;
         data->init_retries = 0; // リトライカウンターをリセット
         data->data_valid = false; // 初期化直後はデータ無効
-        LOG_INF("TLV493D sensor initialization completed successfully");
+        LOG_INF("TLV493D sensor initialization completed successfully using Raspberry Pi method");
         
         tlv493d_diagnose(dev); // 診断を実行
         tlx493d_update_reg_map(dev); // レジスタマップを更新
@@ -928,6 +930,13 @@ static int tlx493d_read_sensor_data(const struct device *dev)
     
     // データ有効フラグを設定
     data->data_valid = true;
+    
+    // データ有効性の最終チェック
+    if (!tlx493d_has_valid_data(dev)) {
+        LOG_WRN("Data validation failed after read");
+        data->data_valid = false;
+        return -EAGAIN;
+    }
     
     generate_bar_graph(data->x, x_bar, sizeof(x_bar));
     generate_bar_graph(data->y, y_bar, sizeof(y_bar));
@@ -1237,7 +1246,7 @@ static void tlx493d_work_handler(struct k_work *work) {
         tlv493d_i2c_bus_recovery(dev);
 
         // 初期化前に待機時間を追加
-        k_msleep(100);
+        k_msleep(10);
         
         // 連続エラー回数に応じて異なるリカバリー戦略を実行
         if (consecutive_errors >= 3) {
@@ -1255,7 +1264,7 @@ static void tlx493d_work_handler(struct k_work *work) {
             last_error_time = current_time;
             
             // エラー回数に応じて待機時間を指数関数的に増加
-            int delay_ms = MIN(1000 * (1 << consecutive_errors), 30000);
+            int delay_ms = MIN(100 * (1 << consecutive_errors), 3000);
             k_work_schedule(&data->work, K_MSEC(delay_ms));
             return;
         }
@@ -1267,6 +1276,14 @@ static void tlx493d_work_handler(struct k_work *work) {
         }
         
         LOG_INF("TLX493D sensor initialization completed successfully");
+    }
+
+    // センサーの機能性をチェック
+    if (!tlx493d_is_functional(dev)) {
+        LOG_WRN("Sensor functionality check failed, attempting recovery");
+        data->initialized = false;  // 再初期化を促す
+        k_work_schedule(&data->work, K_MSEC(1000));
+        return;
     }
 
     // センサーデータの読み取りと処理
@@ -1366,6 +1383,9 @@ static void tlx493d_work_handler(struct k_work *work) {
         LOG_DBG("Movement Delta: X=%d, Y=%d, Z=%d", delta_x, delta_y, delta_z);
     }
 
+    // 自動キャリブレーションをチェック（移動が検出されない場合の自動調整）
+    tlx493d_check_auto_recalibration(dev);
+
     // 次回のワークをスケジュール（移動検出時は高頻度、非検出時は低頻度）
     int next_interval = movement_detected_this_cycle ? 
                        DT_INST_PROP(0, polling_interval_ms) : 
@@ -1414,6 +1434,7 @@ static int tlx493d_init(const struct device *dev)
     
     // レジスタマップを初期化
     memset(data->reg_map, 0, TLV493D_REG_MAP_SIZE);
+    memset(data->config_regs, 0, 4);
 
     if (!device_is_ready(config->i2c.bus)) {
         LOG_ERR("I2C bus %s not ready", config->i2c.bus->name);
@@ -1428,7 +1449,7 @@ static int tlx493d_init(const struct device *dev)
     // システムワークキューの代わりに専用ワークキューを使用してシステム負荷を軽減
     k_work_schedule(&data->work, K_MSEC(3000));
 
-    LOG_INF("TLX493D driver initialized successfully on %s", dev->name);
+    LOG_INF("TLX493D driver initialized successfully on %s with Raspberry Pi fix", dev->name);
     return 0;
 }
 
