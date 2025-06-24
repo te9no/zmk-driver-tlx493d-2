@@ -1,0 +1,7 @@
+config ZMK_BEHAVIOR_Z_AXIS_MORPH
+    bool "Z-axis state dependent behavior morph"
+    default n
+    help
+      Enable Z-axis state dependent behavior morph.
+      This behavior switches between two different behaviors based on
+      the Z-axis state of a 3D Hall sensor.

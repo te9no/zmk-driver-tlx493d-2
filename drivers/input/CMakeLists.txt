@@ -4,3 +4,4 @@
 zephyr_library_amend()
 
 zephyr_library_sources_ifdef(CONFIG_INPUT_TLX493D input_tlx493d.c)
+zephyr_library_include_directories(${CMAKE_CURRENT_SOURCE_DIR}/../../include)

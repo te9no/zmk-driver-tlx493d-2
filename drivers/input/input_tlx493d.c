@@ -3,7 +3,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-#define DT_DRV_COMPAT infineon_tlx493d
+#define DT_DRV_COMPAT infineon_tlx493d_a2bw
 
 #include <zephyr/device.h>
 #include <zephyr/drivers/i2c.h>
@@ -13,27 +13,73 @@
 #include <stdio.h>
 #include <string.h>
 #include <stdlib.h> // For abs()
+#include <zmk/drivers/sensor/tlx493d_state.h>
+#include <zmk/behavior.h>
+#include <zmk/keymap.h>
 
 LOG_MODULE_REGISTER(tlx493d, CONFIG_INPUT_LOG_LEVEL);
 
-// TLV493D-A1B6 Registers
-#define TLV493D_REG_BX_MSB      0x00
-#define TLV493D_REG_TEMP_LSB    0x07
-#define TLV493D_REG_MAP_SIZE    10  // レジスタマップのサイズ
+// TLV493D-A2BW Registers
+#define TLV493D_REG_BX_MSB      0x00  // Magnetic values MSBs
+#define TLV493D_REG_BY_MSB      0x01
+#define TLV493D_REG_BZ_MSB      0x02
+#define TLV493D_REG_TEMP_MSB    0x03  // Temperature value MSBs
+#define TLV493D_REG_BX2         0x04  // Magnetic values LSBs
+#define TLV493D_REG_TEMP2       0x05  // Temperature and magnetic LSBs
+#define TLV493D_REG_DIAG        0x06  // Sensor diagnostic and status
+#define TLV493D_REG_CONFIG      0x10  // Configuration register
+#define TLV493D_REG_MOD1        0x11  // Power mode, interrupt, address, parity
+#define TLV493D_REG_MOD2        0x13  // Low Power Mode update rate
+#define TLV493D_REG_CONFIG2     0x14  // Configuration register 2
+#define TLV493D_REG_VER         0x16  // Version register
+#define TLV493D_REG_MAP_SIZE    23    // レジスタマップのサイズ
 
-// Write registers
-#define TLV493D_REG_MOD1        0x01
-#define TLV493D_REG_MOD2        0x03
+// CONFIG register bits (0x10)
+#define TLV493D_CONFIG_DT       BIT(7)  // Disable Temperature
+#define TLV493D_CONFIG_AM       BIT(6)  // X/Y Angular Measurement
+#define TLV493D_CONFIG_TRIG_MASK 0x30   // Trigger options bits [5:4]
+#define TLV493D_CONFIG_X2       BIT(3)  // Short-range sensitivity
+#define TLV493D_CONFIG_TL_MAG_MASK 0x06 // Magnetic temperature compensation [2:1]
+#define TLV493D_CONFIG_CP       BIT(0)  // Configuration parity
 
-// MOD1 register bits
-#define TLV493D_MOD1_FASTMODE   BIT(1)
+// MOD1 register bits (0x11)
+#define TLV493D_MOD1_FP         BIT(7)  // Fuse parity
+#define TLV493D_MOD1_IICADR_MASK 0x60   // I2C address bits [6:5]
+#define TLV493D_MOD1_PR         BIT(4)  // I2C 1-byte or 2-byte read protocol
+#define TLV493D_MOD1_CA         BIT(3)  // Collision avoidance and clock stretching
+#define TLV493D_MOD1_INT        BIT(2)  // Interrupt
+#define TLV493D_MOD1_MODE_MASK  0x03    // Power mode bits [1:0]
 
-// MOD2 register bits
-#define TLV493D_MOD2_TEMP_EN    BIT(7)
+// MOD2 register bits (0x13)
+#define TLV493D_MOD2_PRD        BIT(7)  // Update rate settings
 
-// Recovery and reset commands
+// CONFIG2 register bits (0x14)
+#define TLV493D_CONFIG2_X4      BIT(0)  // Extra short range sensitivity
+
+// DIAG register bits (0x06)
+#define TLV493D_DIAG_P          BIT(7)  // Bus parity
+#define TLV493D_DIAG_FF         BIT(6)  // Fuse parity flag
+#define TLV493D_DIAG_CF         BIT(5)  // Configuration parity flag
+#define TLV493D_DIAG_T          BIT(4)  // T bit
+#define TLV493D_DIAG_PD3        BIT(3)  // Power-down flag 3
+#define TLV493D_DIAG_PD0        BIT(2)  // Power-down flag 0
+#define TLV493D_DIAG_FRM_MASK   0x03    // Frame counter bits [1:0]
+
+// A2BW Recovery and reset commands
 #define TLV493D_RECOVERY_CMD    0xFF
 #define TLV493D_RESET_CMD       0x00
+#define TLV493D_RESET_DELAY_US  30      // 30μs delay after reset sequence
+
+// Power modes
+#define TLV493D_MODE_LOW_POWER      0x00
+#define TLV493D_MODE_MASTER_CTRL    0x01
+#define TLV493D_MODE_FAST           0x03
+
+// I2C addresses (from Table 4)
+#define TLV493D_I2C_ADDR_DEFAULT    0x35  // 6AH/6BH (write/read)
+#define TLV493D_I2C_ADDR_ALT1       0x22  // 44H/45H
+#define TLV493D_I2C_ADDR_ALT2       0x78  // F0H/F1H
+#define TLV493D_I2C_ADDR_ALT3       0x44  // 88H/89H
 
 // Bar graph settings
 #define BAR_GRAPH_WIDTH 40
@@ -43,8 +89,11 @@ LOG_MODULE_REGISTER(tlx493d, CONFIG_INPUT_LOG_LEVEL);
 // Deadzone for X/Y movement to prevent spurious input
 #define XY_DEADZONE 3
 
-// Deadzone for Z movement to prevent spurious input
-#define Z_DEADZONE 5
+// Default Z-axis threshold for press detection
+#define Z_PRESS_THRESHOLD_DEFAULT 50
+
+// Default Z-axis hysteresis to prevent bounce  
+#define Z_HYSTERESIS_DEFAULT 10
 
 // Hysteresis for movement detection
 #define HYSTERESIS_THRESHOLD 20
@@ -81,6 +130,12 @@ LOG_MODULE_REGISTER(tlx493d, CONFIG_INPUT_LOG_LEVEL);
 struct tlx493d_config {
     struct i2c_dt_spec i2c;
     bool addr_pin_high;
+    int16_t z_press_threshold;
+    int16_t z_hysteresis;
+    struct zmk_behavior_binding normal_binding;
+    struct zmk_behavior_binding pressed_binding;
+    bool has_normal_binding;
+    bool has_pressed_binding;
 };
 
 struct tlx493d_data {
@@ -88,12 +143,12 @@ struct tlx493d_data {
     int16_t x;
     int16_t y;
     int16_t z;
+    int16_t temp;             // Temperature value for A2BW
     int16_t origin_x;
     int16_t origin_y;
     int16_t origin_z;
     bool calibrated;
     struct k_work_delayable work;
-    uint8_t factory_settings[3];
     bool initialized;
     uint32_t log_counter;
     bool movement_active_x;
@@ -107,8 +162,10 @@ struct tlx493d_data {
     int64_t last_movement_time;
     bool movement_detected;
     uint8_t bus_recovery_attempts;
-    uint8_t prev_frm_counter; // ADCハングアップ検出用
-    uint8_t hang_up_count;    // ADCハングアップカウンター
+    uint8_t prev_frm_counter; // Frame counter for consistency check
+    uint8_t hang_up_count;    // Hang-up detection counter
+    bool z_pressed;           // Z軸押し込み状態
+    bool prev_z_pressed;      // 前回のZ軸状態
 };
 
 // 関数プロトタイプ宣言
@@ -202,25 +259,73 @@ static void tlv493d_diagnose_error(const struct device *dev, int error_code)
 }
 
 /**
- * @brief リカバリーフレームを送信する
+ * @brief A2BW専用リセットシーケンスを実行する
  */
-static int tlv493d_send_recovery_frame(const struct device *dev)
+static int tlv493d_a2bw_reset_sequence(const struct device *dev)
 {
     const struct tlx493d_config *config = dev->config;
     uint8_t recovery_cmd = TLV493D_RECOVERY_CMD;
-    LOG_DBG("Sending recovery frame");
-    return i2c_write_dt(&config->i2c, &recovery_cmd, 1);
+    uint8_t reset_cmd = TLV493D_RESET_CMD;
+    int ret;
+
+    LOG_INF("Starting A2BW reset sequence");
+    
+    // Step 1: Send 0xFF twice
+    ret = i2c_write_dt(&config->i2c, &recovery_cmd, 1);
+    if (ret < 0) return ret;
+    
+    ret = i2c_write_dt(&config->i2c, &recovery_cmd, 1);
+    if (ret < 0) return ret;
+    
+    // Step 2: Send 0x00 twice
+    ret = i2c_write_dt(&config->i2c, &reset_cmd, 1);
+    if (ret < 0) return ret;
+    
+    ret = i2c_write_dt(&config->i2c, &reset_cmd, 1);
+    if (ret < 0) return ret;
+    
+    // Step 3: Wait 30μs as specified in A2BW manual
+    k_usleep(TLV493D_RESET_DELAY_US);
+    
+    LOG_DBG("A2BW reset sequence completed");
+    return 0;
 }
 
 /**
- * @brief リセットコマンドを送信する
+ * @brief A2BW診断レジスタを確認して初期化成功を判定する
  */
-static int tlv493d_send_reset_command(const struct device *dev)
+static int tlv493d_a2bw_check_diagnostic(const struct device *dev)
 {
-    const struct tlx493d_config *config = dev->config;
-    uint8_t reset_cmd = TLV493D_RESET_CMD;
-    LOG_DBG("Sending reset command");
-    return i2c_write_dt(&config->i2c, &reset_cmd, 1);
+    uint8_t diag_val;
+    int ret = tlx493d_read_reg(dev, TLV493D_REG_DIAG, &diag_val);
+    if (ret < 0) {
+        LOG_ERR("Failed to read diagnostic register");
+        return ret;
+    }
+    
+    LOG_DBG("Diagnostic register: 0x%02X", diag_val);
+    
+    // Check fuse parity flag (FF)
+    if (!(diag_val & TLV493D_DIAG_FF)) {
+        LOG_ERR("Fuse parity check failed - sensor defective");
+        return -EIO;
+    }
+    
+    // Check configuration parity flag (CF)
+    if (!(diag_val & TLV493D_DIAG_CF)) {
+        LOG_WARN("Configuration parity check failed");
+    }
+    
+    // Check power-down flags (PD0, PD3)
+    if (!(diag_val & TLV493D_DIAG_PD0)) {
+        LOG_DBG("ADC conversion of Bx not yet completed");
+    }
+    
+    if (!(diag_val & TLV493D_DIAG_PD3)) {
+        LOG_DBG("ADC conversion of Temp not yet completed");
+    }
+    
+    return 0;
 }
 
 /**
@@ -247,55 +352,95 @@ static int tlv493d_general_reset(const struct device *dev)
 }
 
 /**
- * @brief 工場設定を読み取る
+ * @brief A2BWバージョンレジスタを読み取って識別する
  */
-static int tlv493d_read_factory_settings(const struct device *dev)
+static int tlv493d_a2bw_read_version(const struct device *dev)
 {
-    struct tlx493d_data *data = dev->data;
-    int ret = tlx493d_read_multiple(dev, TLV493D_REG_TEMP_LSB, data->factory_settings, 3);
+    uint8_t ver_val;
+    int ret = tlx493d_read_reg(dev, TLV493D_REG_VER, &ver_val);
     if (ret < 0) {
-        LOG_ERR("Failed to read factory settings (ret %d)", ret);
+        LOG_ERR("Failed to read version register");
+        return ret;
     }
-    return ret;
-}
-
-/**
- * @brief センサーを設定する
- */
-static int tlv493d_configure_sensor(const struct device *dev)
-{
-    struct tlx493d_data *data = dev->data;
-    int ret;
-    uint8_t mod1_val, mod2_val;
-
-    mod1_val = (data->factory_settings[0] & 0xF8) | TLV493D_MOD1_FASTMODE;
-    ret = tlx493d_write_reg(dev, TLV493D_REG_MOD1, mod1_val);
-    if (ret < 0) return ret;
-    k_msleep(INIT_STEP_DELAY_MS);
-
-    mod2_val = data->factory_settings[2] & (~TLV493D_MOD2_TEMP_EN);
-    ret = tlx493d_write_reg(dev, TLV493D_REG_MOD2, mod2_val);
-    if (ret < 0) return ret;
-    k_msleep(INIT_STEP_DELAY_MS);
-
-    LOG_INF("Sensor configured: MOD1=0x%02X, MOD2=0x%02X", mod1_val, mod2_val);
+    
+    uint8_t type = (ver_val >> 4) & 0x03;
+    uint8_t hwv = ver_val & 0x0F;
+    
+    LOG_INF("A2BW Version: TYPE=0x%X, HWV=0x%X", type, hwv);
+    
+    if (type != 0x3) {
+        LOG_WARN("Unexpected TYPE field: 0x%X (expected 0x3)", type);
+    }
+    
+    if (hwv != 0x9) {
+        LOG_WARN("Unexpected HWV field: 0x%X (expected 0x9 for B21 design)", hwv);
+    }
+    
     return 0;
 }
 
 /**
- * @brief センサーの診断を行う
+ * @brief A2BWセンサーを設定する
  */
-static int tlv493d_diagnose(const struct device *dev)
+static int tlv493d_a2bw_configure_sensor(const struct device *dev)
 {
-    uint8_t reg_values[TLV493D_REG_MAP_SIZE];
-    int ret = tlx493d_read_multiple(dev, 0, reg_values, sizeof(reg_values));
+    int ret;
+    uint8_t config_val, mod1_val, mod2_val;
+    
+    // CONFIG register (0x10) - Enable all measurements, short range sensitivity
+    config_val = TLV493D_CONFIG_X2;  // Short-range sensitivity for better precision
+    // Calculate parity for config register (even parity)
+    uint8_t parity = 0;
+    for (int i = 1; i < 8; i++) {
+        if (config_val & BIT(i)) parity ^= 1;
+    }
+    if (parity) config_val |= TLV493D_CONFIG_CP;
+    
+    ret = tlx493d_write_reg(dev, TLV493D_REG_CONFIG, config_val);
+    if (ret < 0) return ret;
+    k_msleep(INIT_STEP_DELAY_MS);
+    
+    // MOD1 register (0x11) - Fast mode, interrupt enabled, default address
+    mod1_val = TLV493D_MODE_FAST;  // Fast mode for continuous measurements
+    mod1_val &= ~TLV493D_MOD1_INT; // Enable interrupt
+    mod1_val |= TLV493D_MOD1_CA;   // Enable collision avoidance
+    
+    ret = tlx493d_write_reg(dev, TLV493D_REG_MOD1, mod1_val);
+    if (ret < 0) return ret;
+    k_msleep(INIT_STEP_DELAY_MS);
+    
+    // MOD2 register (0x13) - Fast update rate
+    mod2_val = 0x00;  // Fast update rate (PRD=0)
+    ret = tlx493d_write_reg(dev, TLV493D_REG_MOD2, mod2_val);
+    if (ret < 0) return ret;
+    k_msleep(INIT_STEP_DELAY_MS);
+    
+    LOG_INF("A2BW configured: CONFIG=0x%02X, MOD1=0x%02X, MOD2=0x%02X", 
+            config_val, mod1_val, mod2_val);
+    return 0;
+}
+
+/**
+ * @brief A2BW診断情報を表示する
+ */
+static int tlv493d_a2bw_diagnose(const struct device *dev)
+{
+    uint8_t diag_val;
+    int ret = tlx493d_read_reg(dev, TLV493D_REG_DIAG, &diag_val);
     if (ret < 0) {
-        LOG_ERR("Failed to read registers for diagnostics (ret %d)", ret);
+        LOG_ERR("Failed to read diagnostic register");
         return ret;
     }
-    for (int i = 0; i < sizeof(reg_values); i++) {
-        LOG_INF("  Reg[%d] = 0x%02X", i, reg_values[i]);
-    }
+    
+    LOG_INF("A2BW Diagnostic Status:");
+    LOG_INF("  Bus Parity (P): %s", (diag_val & TLV493D_DIAG_P) ? "OK" : "ERROR");
+    LOG_INF("  Fuse Parity (FF): %s", (diag_val & TLV493D_DIAG_FF) ? "OK" : "ERROR");
+    LOG_INF("  Config Parity (CF): %s", (diag_val & TLV493D_DIAG_CF) ? "OK" : "ERROR");
+    LOG_INF("  T bit: %s", (diag_val & TLV493D_DIAG_T) ? "Valid" : "Invalid");
+    LOG_INF("  Temp ADC (PD3): %s", (diag_val & TLV493D_DIAG_PD3) ? "Complete" : "Running");
+    LOG_INF("  Bx ADC (PD0): %s", (diag_val & TLV493D_DIAG_PD0) ? "Complete" : "Running");
+    LOG_INF("  Frame Counter: %d", diag_val & TLV493D_DIAG_FRM_MASK);
+    
     return 0;
 }
 
@@ -320,49 +465,71 @@ static int tlv493d_power_cycle(const struct device *dev)
 }
 
 /**
- * @brief センサーを初期化する
+ * @brief A2BWセンサーを初期化する
  */
-static int tlv493d_initialize_sensor(const struct device *dev)
+static int tlv493d_a2bw_initialize_sensor(const struct device *dev)
 {
     struct tlx493d_data *data = dev->data;
     int ret;
     int retry_count = 0;
 
-    LOG_INF("Starting TLV493D sensor initialization sequence");
+    LOG_INF("Starting TLV493D-A2BW sensor initialization sequence");
 
     while (retry_count < MAX_INIT_RETRIES) {
-        LOG_DBG("Initialization attempt %d/%d", retry_count + 1, MAX_INIT_RETRIES);
+        LOG_DBG("A2BW initialization attempt %d/%d", retry_count + 1, MAX_INIT_RETRIES);
 
-        tlv493d_power_cycle(dev);
-        k_msleep(200);
-
-        for (int i = 0; i < 3; i++) {
-            tlv493d_send_recovery_frame(dev);
-            k_msleep(INIT_STEP_DELAY_MS);
+        // Step 1: A2BW specific reset sequence
+        ret = tlv493d_a2bw_reset_sequence(dev);
+        if (ret < 0) {
+            LOG_WARN("A2BW reset sequence failed (ret %d)", ret);
+            goto next_attempt;
         }
 
-        for (int i = 0; i < 3; i++) {
-            tlv493d_send_reset_command(dev);
-            k_msleep(RESET_DELAY_MS);
+        // Step 2: Wait for sensor to settle
+        k_msleep(100);
+
+        // Step 3: Read and verify version register
+        ret = tlv493d_a2bw_read_version(dev);
+        if (ret < 0) {
+            LOG_WARN("Version register read failed (ret %d)", ret);
+            goto next_attempt;
         }
 
+        // Step 4: Check diagnostic status
+        ret = tlv493d_a2bw_check_diagnostic(dev);
+        if (ret < 0) {
+            LOG_WARN("Diagnostic check failed (ret %d)", ret);
+            goto next_attempt;
+        }
+
+        // Step 5: Configure sensor
+        ret = tlv493d_a2bw_configure_sensor(dev);
+        if (ret < 0) {
+            LOG_WARN("Sensor configuration failed (ret %d)", ret);
+            goto next_attempt;
+        }
+
+        // Step 6: Verify configuration was successful
+        ret = tlv493d_a2bw_check_diagnostic(dev);
+        if (ret < 0) {
+            LOG_WARN("Post-configuration diagnostic check failed (ret %d)", ret);
+            goto next_attempt;
+        }
+
+        // Step 7: Test data read
         uint8_t test_read;
         ret = tlx493d_read_reg(dev, TLV493D_REG_BX_MSB, &test_read);
-        if (ret < 0) goto next_attempt;
-
-        ret = tlv493d_read_factory_settings(dev);
-        if (ret < 0) goto next_attempt;
-        k_msleep(INIT_STEP_DELAY_MS);
-
-        ret = tlv493d_configure_sensor(dev);
-        if (ret < 0) goto next_attempt;
+        if (ret < 0) {
+            LOG_WARN("Test data read failed (ret %d)", ret);
+            goto next_attempt;
+        }
 
         data->initialized = true;
         data->init_retries = 0;
         data->data_valid = false;
-        LOG_INF("TLV493D sensor initialization completed successfully");
+        LOG_INF("TLV493D-A2BW sensor initialization completed successfully");
 
-        tlv493d_diagnose(dev);
+        tlv493d_a2bw_diagnose(dev);
         return 0;
 
     next_attempt:
@@ -370,7 +537,7 @@ static int tlv493d_initialize_sensor(const struct device *dev)
         k_msleep(INIT_STEP_DELAY_MS * (1 << retry_count));
     }
 
-    LOG_ERR("TLV493D sensor initialization failed after %d attempts", MAX_INIT_RETRIES);
+    LOG_ERR("TLV493D-A2BW sensor initialization failed after %d attempts", MAX_INIT_RETRIES);
     return -EIO;
 }
 
@@ -403,12 +570,12 @@ static void generate_bar_graph(int16_t value, char *buffer, size_t buffer_size)
 }
 
 /**
- * @brief センサーデータを読み取る
+ * @brief A2BWセンサーデータを読み取る
  */
-static int tlx493d_read_sensor_data(const struct device *dev)
+static int tlx493d_a2bw_read_sensor_data(const struct device *dev)
 {
     struct tlx493d_data *data = dev->data;
-    uint8_t raw_data[7]; // Read up to Reg 6 to get all data
+    uint8_t raw_data[7]; // Read registers 0x00-0x06
     int ret;
     char x_bar[BAR_GRAPH_WIDTH + 1], y_bar[BAR_GRAPH_WIDTH + 1], z_bar[BAR_GRAPH_WIDTH + 1];
 
@@ -416,21 +583,50 @@ static int tlx493d_read_sensor_data(const struct device *dev)
         return -ENODEV;
     }
 
+    // Read all measurement and diagnostic registers at once for consistency
     ret = tlx493d_read_multiple(dev, TLV493D_REG_BX_MSB, raw_data, 7);
     if (ret < 0) {
-        LOG_ERR("Failed to read sensor data (ret %d)", ret);
+        LOG_ERR("Failed to read A2BW sensor data (ret %d)", ret);
         data->data_valid = false;
         return ret;
     }
     
-    // 12ビット値を正しく結合し、符号拡張を行う
+    // Check diagnostic register for data validity
+    uint8_t diag = raw_data[6];
+    if (!(diag & TLV493D_DIAG_PD0) || !(diag & TLV493D_DIAG_PD3)) {
+        LOG_DBG("ADC conversion not complete - data invalid");
+        data->data_valid = false;
+        return -EAGAIN;
+    }
+    
+    // Verify bus parity if available
+    uint8_t calc_parity = 0;
+    for (int i = 0; i < 6; i++) {
+        for (int bit = 0; bit < 8; bit++) {
+            if (raw_data[i] & BIT(bit)) calc_parity ^= 1;
+        }
+    }
+    
+    if (((diag & TLV493D_DIAG_P) != 0) != calc_parity) {
+        LOG_WARN("Bus parity error detected - data may be corrupt");
+    }
+    
+    // A2BW data format: 12-bit values
+    // Bx: MSB in reg[0], LSB[7:4] in reg[4]
+    // By: MSB in reg[1], LSB[3:0] in reg[4] 
+    // Bz: MSB in reg[2], LSB[3:0] in reg[5]
+    // Temp: MSB in reg[3], LSB[7:6] in reg[5]
+    
     int16_t bx_val = (raw_data[0] << 4) | (raw_data[4] >> 4);
     int16_t by_val = (raw_data[1] << 4) | (raw_data[4] & 0x0F);
     int16_t bz_val = (raw_data[2] << 4) | (raw_data[5] & 0x0F);
+    int16_t temp_val = (raw_data[3] << 4) | ((raw_data[5] >> 6) & 0x03);
 
+    // Apply sign extension for 12-bit two's complement values
     data->x = (bx_val << 4) >> 4;
     data->y = (by_val << 4) >> 4;
     data->z = (bz_val << 4) >> 4;
+    data->temp = (temp_val << 4) >> 4; // Store temperature if needed
 
     data->data_valid = true;
 
@@ -438,9 +634,10 @@ static int tlx493d_read_sensor_data(const struct device *dev)
         generate_bar_graph(data->x, x_bar, sizeof(x_bar));
         generate_bar_graph(data->y, y_bar, sizeof(y_bar));
         generate_bar_graph(data->z, z_bar, sizeof(z_bar));
-        LOG_INF("X: %5d [%s]", data->x, x_bar);
-        LOG_INF("Y: %5d [%s]", data->y, y_bar);
-        LOG_INF("Z: %5d [%s]", data->z, z_bar);
+        LOG_INF("A2BW X: %5d [%s]", data->x, x_bar);
+        LOG_INF("A2BW Y: %5d [%s]", data->y, y_bar);
+        LOG_INF("A2BW Z: %5d [%s]", data->z, z_bar);
+        LOG_DBG("Frame: %d, Temp: %d", diag & TLV493D_DIAG_FRM_MASK, data->temp);
     }
 
     return 0;
@@ -455,7 +652,7 @@ static void tlx493d_calibrate(const struct device *dev) {
 
     LOG_INF("Starting sensor calibration...");
     for (int i = 0; i < CALIBRATION_SAMPLES; i++) {
-        if (tlx493d_read_sensor_data(dev) != 0) {
+        if (tlx493d_a2bw_read_sensor_data(dev) != 0) {
             LOG_ERR("Calibration failed: Could not read data.");
             data->calibrated = false;
             return;
@@ -487,7 +684,7 @@ static void tlx493d_work_handler(struct k_work *work) {
     int ret;
 
     if (!data->initialized) {
-        ret = tlv493d_initialize_sensor(dev);
+        ret = tlv493d_a2bw_initialize_sensor(dev);
         if (ret != 0) {
             LOG_ERR("Failed to initialize sensor in work handler (ret %d)", ret);
             k_work_schedule(&data->work, K_MSEC(1000));
@@ -498,7 +695,7 @@ static void tlx493d_work_handler(struct k_work *work) {
         }
     }
 
-    ret = tlx493d_read_sensor_data(dev);
+    ret = tlx493d_a2bw_read_sensor_data(dev);
     if (ret != 0) {
         data->error_count++;
         if (data->error_count > ERROR_THRESHOLD) {
@@ -510,31 +707,33 @@ static void tlx493d_work_handler(struct k_work *work) {
     }
     data->error_count = 0;
 
-    // --- ADC HANG-UP DETECTION ---
-    // マニュアル[5.6]によると、フレームカウンター(FRM)の停止はADCのハングアップを示します。
-    // FRMはTempレジスタ(アドレス0x03)のビット3:2にあります。
-    uint8_t current_frm = (data->reg_map[3] >> 2) & 0x03;
-
-    if (data->initialized && data->calibrated && (current_frm == data->prev_frm_counter)) {
-        data->hang_up_count++;
-        if (data->hang_up_count > ADC_HANG_UP_THRESHOLD) {
-            LOG_ERR("ADC hang-up detected! (FRM stuck at %d). Performing general reset.", current_frm);
-            ret = tlv493d_general_reset(dev);
-            if (ret == 0) {
-                // 次のサイクルで再初期化を強制する
-                data->initialized = false;
-                data->calibrated = false;
+    // --- A2BW FRAME COUNTER CHECK ---
+    // A2BWマニュアルによると、フレームカウンター(FRM)は診断レジスタ(0x06)のビット[1:0]にあります。
+    uint8_t diag_reg;
+    if (tlx493d_read_reg(dev, TLV493D_REG_DIAG, &diag_reg) == 0) {
+        uint8_t current_frm = diag_reg & TLV493D_DIAG_FRM_MASK;
+        
+        if (data->initialized && data->calibrated && (current_frm == data->prev_frm_counter)) {
+            data->hang_up_count++;
+            if (data->hang_up_count > ADC_HANG_UP_THRESHOLD) {
+                LOG_ERR("A2BW ADC hang-up detected! (FRM stuck at %d). Performing reset.", current_frm);
+                ret = tlv493d_a2bw_reset_sequence(dev);
+                if (ret == 0) {
+                    // 次のサイクルで再初期化を強制する
+                    data->initialized = false;
+                    data->calibrated = false;
+                }
+                data->hang_up_count = 0;
+                // リセットと再初期化のために遅延させて再スケジュール
+                k_work_schedule(&data->work, K_MSEC(500));
+                return;
             }
+        } else {
             data->hang_up_count = 0;
-            // リセットと再初期化のために遅延させて再スケジュール
-            k_work_schedule(&data->work, K_MSEC(500));
-            return;
         }
-    } else {
-        data->hang_up_count = 0;
+        data->prev_frm_counter = current_frm;
     }
-    data->prev_frm_counter = current_frm;
-    // --- END ADC HANG-UP DETECTION ---
+    // --- END A2BW FRAME COUNTER CHECK ---
 
     if (!data->calibrated) {
         k_work_schedule(&data->work, K_MSEC(DT_INST_PROP(0, polling_interval_ms)));
@@ -546,16 +745,46 @@ static void tlx493d_work_handler(struct k_work *work) {
     int16_t delta_z = data->z - data->origin_z;
     bool report_sync = false;
 
-    if (abs(delta_x) > XY_DEADZONE) {
+    // Z軸状態検出（ヒステリシス付き）
+    const struct tlx493d_config *config = dev->config;
+    if (!data->z_pressed && abs(delta_z) > config->z_press_threshold) {
+        data->z_pressed = true;
+        LOG_DBG("Z-axis pressed: delta_z=%d", delta_z);
+    } else if (data->z_pressed && abs(delta_z) < (config->z_press_threshold - config->z_hysteresis)) {
+        data->z_pressed = false;
+        LOG_DBG("Z-axis released: delta_z=%d", delta_z);
+    }
+
+    // Z軸状態変化の検出
+    if (data->z_pressed != data->prev_z_pressed) {
+        // Z軸状態を共有状態システムに通知
+        tlx493d_set_z_axis_pressed(data->z_pressed);
+        LOG_INF("Z-axis state changed: %s", data->z_pressed ? "PRESSED" : "RELEASED");
+        data->prev_z_pressed = data->z_pressed;
+    }
+
+    // XY移動の処理（Z軸状態に依存）
+    if (abs(delta_x) > XY_DEADZONE || abs(delta_y) > XY_DEADZONE) {
+        // 設定されたbehavior bindingを実行
+        struct zmk_behavior_binding_event event = {
+            .layer = 0,
+            .position = 0,
+            .timestamp = k_uptime_get(),
+        };
+        
+        if (data->z_pressed && config->has_pressed_binding) {
+            // 押し込み状態: pressed_bindingを実行
+            LOG_DBG("XY movement in pressed state: dx=%d, dy=%d", delta_x, delta_y);
+            zmk_behavior_invoke_binding(&config->pressed_binding, event, true);
+        } else if (!data->z_pressed && config->has_normal_binding) {
+            // 通常状態: normal_bindingを実行
+            LOG_DBG("XY movement in normal state: dx=%d, dy=%d", delta_x, delta_y);
+            zmk_behavior_invoke_binding(&config->normal_binding, event, true);
+        }
+        
+        // 相対移動イベントも引き続き送信（input processorで処理される）
         input_report_rel(dev, INPUT_REL_X, delta_x, false, K_FOREVER);
-        report_sync = true;
-    }
-    if (abs(delta_y) > XY_DEADZONE) {
         input_report_rel(dev, INPUT_REL_Y, delta_y, false, K_FOREVER);
-        report_sync = true;
-    }
-    if (abs(delta_z) > Z_DEADZONE) {
-        input_report_rel(dev, INPUT_REL_WHEEL, (delta_z > 0 ? 1 : -1), false, K_FOREVER);
         report_sync = true;
     }
 
@@ -580,6 +809,8 @@ static int tlx493d_init(const struct device *dev)
     data->bus_recovery_attempts = 0;
     data->prev_frm_counter = 0xFF; // 無効な値で初期化
     data->hang_up_count = 0;
+    data->z_pressed = false;
+    data->prev_z_pressed = false;
 
     if (!device_is_ready(config->i2c.bus)) {
         LOG_ERR("I2C bus %s not ready", config->i2c.bus->name);
@@ -600,6 +831,16 @@ static int tlx493d_init(const struct device *dev)
     static const struct tlx493d_config tlx493d_config_##inst = { \
         .i2c = I2C_DT_SPEC_INST_GET(inst), \
         .addr_pin_high = DT_INST_PROP_OR(inst, addr_pin_high, false), \
+        .z_press_threshold = DT_INST_PROP_OR(inst, z_press_threshold, Z_PRESS_THRESHOLD_DEFAULT), \
+        .z_hysteresis = DT_INST_PROP_OR(inst, z_hysteresis, Z_HYSTERESIS_DEFAULT), \
+        .normal_binding = COND_CODE_1(DT_INST_NODE_HAS_PROP(inst, normal_binding), \
+                                      (ZMK_KEYMAP_EXTRACT_BINDING(0, DT_DRV_INST(inst))), \
+                                      ({})), \
+        .pressed_binding = COND_CODE_1(DT_INST_NODE_HAS_PROP(inst, pressed_binding), \
+                                       (ZMK_KEYMAP_EXTRACT_BINDING(1, DT_DRV_INST(inst))), \
+                                       ({})), \
+        .has_normal_binding = DT_INST_NODE_HAS_PROP(inst, normal_binding), \
+        .has_pressed_binding = DT_INST_NODE_HAS_PROP(inst, pressed_binding), \
     }; \
     DEVICE_DT_INST_DEFINE(inst, tlx493d_init, NULL, \
                           &tlx493d_data_##inst, &tlx493d_config_##inst, \

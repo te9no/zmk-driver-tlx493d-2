@@ -1,7 +1,7 @@
 description: |
-  Infineon TLX493D 3D magnetic sensor driver
+  Infineon TLX493D-A2BW 3D magnetic sensor driver with improved reliability
 
-compatible: "infineon,tlx493d"
+compatible: "infineon,tlx493d-a2bw"
 
 include: i2c-device.yaml
 
@@ -13,3 +13,25 @@ properties:
     type: int
     default: 10
     description: Polling interval in milliseconds
+  
+  z-press-threshold:
+    type: int
+    default: 50
+    description: Z-axis threshold for press detection
+  
+  z-hysteresis:
+    type: int
+    default: 10
+    description: Z-axis hysteresis to prevent bounce
+  
+  normal-binding:
+    type: phandle-array
+    description: |
+      Behavior binding for normal state (Z-axis not pressed).
+      This binding is invoked when XY movement is detected in normal state.
+  
+  pressed-binding:
+    type: phandle-array
+    description: |
+      Behavior binding for pressed state (Z-axis pressed down).
+      This binding is invoked when XY movement is detected in pressed state.

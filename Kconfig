@@ -1,1 +1,2 @@
 rsource "drivers/Kconfig"
+rsource "src/behaviors/Kconfig"
