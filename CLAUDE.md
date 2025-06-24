@@ -155,7 +155,7 @@ west build
 **MANDATORY BUILD CHECK**: After any implementation or modification, verify that the build passes by running the following command:
 
 ```bash
-west build -p -d build/MKB -b seeeduino_xiao_ble -S "zmk-usb-logging studio-rpc-usb-uart" -- -DSHIELD=MKB_L_RZT -DZMK_CONFIG="/workspaces/zmk-config/zmk-config-MKB-1/" -DZMK_EXTRA_MODULES="/workspaces/zmk-modules/zmk-rgbled-widget/;/workspaces/zmk-modules/zmk-pmw3610-driver;/workspaces/zmk-modules/zmk-dongle-display;/workspaces/zmk-modules/zmk-analog-input-driver;/workspaces/zmk-modules/zmk-driver-hmc5883l;/workspaces/zmk-modules/zmk-input-processor-keytoggle;/workspaces/zmk-modules/zmk-driver-tlx493d-2;/workspaces/zmk-modules/zmk-layout-shift"  -DCONFIG_ZMK_STUDIO=y
+west build -p -d build/MKB -b seeeduino_xiao_ble -S "zmk-usb-logging studio-rpc-usb-uart" -- -DSHIELD=MKB_L_RZT -DZMK_CONFIG="/workspaces/zmk-config/zmk-config-MKB-1/" -DZMK_EXTRA_MODULES="/workspaces/zmk-modules/zmk-rgbled-widget/;/workspaces/zmk-modules/zmk-pmw3610-driver;/workspaces/zmk-modules/zmk-nice-oled;/workspaces/zmk-modules/zmk-analog-input-driver;/workspaces/zmk-modules/zmk-input-processor-keybind;/workspaces/zmk-modules/zmk-driver-tlx493d-2;/workspaces/zmk-modules/zmk-layout-shift"  -DCONFIG_ZMK_STUDIO=y
 ```
 
 If build fails, fix the issue and try again until it passes.

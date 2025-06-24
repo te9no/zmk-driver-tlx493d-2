@@ -24,14 +24,9 @@ properties:
     default: 10
     description: Z-axis hysteresis to prevent bounce
   
-  normal-binding:
-    type: phandle-array
+  enable-z-state-bindings:
+    type: boolean
     description: |
-      Behavior binding for normal state (Z-axis not pressed).
-      This binding is invoked when XY movement is detected in normal state.
-  
-  pressed-binding:
-    type: phandle-array
-    description: |
-      Behavior binding for pressed state (Z-axis pressed down).
-      This binding is invoked when XY movement is detected in pressed state.
+      Enable Z-axis state dependent behavior bindings.
+      When true, the driver will invoke behaviors based on Z-axis state.
+      Configure behaviors through ZMK behavior system.

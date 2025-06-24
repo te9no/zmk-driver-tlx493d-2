@@ -313,7 +313,7 @@ static int tlv493d_a2bw_check_diagnostic(const struct device *dev)
     
     // Check configuration parity flag (CF)
     if (!(diag_val & TLV493D_DIAG_CF)) {
-        LOG_WARN("Configuration parity check failed");
+        LOG_WRN("Configuration parity check failed");
     }
     
     // Check power-down flags (PD0, PD3)
@@ -369,11 +369,11 @@ static int tlv493d_a2bw_read_version(const struct device *dev)
     LOG_INF("A2BW Version: TYPE=0x%X, HWV=0x%X", type, hwv);
     
     if (type != 0x3) {
-        LOG_WARN("Unexpected TYPE field: 0x%X (expected 0x3)", type);
+        LOG_WRN("Unexpected TYPE field: 0x%X (expected 0x3)", type);
     }
     
     if (hwv != 0x9) {
-        LOG_WARN("Unexpected HWV field: 0x%X (expected 0x9 for B21 design)", hwv);
+        LOG_WRN("Unexpected HWV field: 0x%X (expected 0x9 for B21 design)", hwv);
     }
     
     return 0;
@@ -481,7 +481,7 @@ static int tlv493d_a2bw_initialize_sensor(const struct device *dev)
         // Step 1: A2BW specific reset sequence
         ret = tlv493d_a2bw_reset_sequence(dev);
         if (ret < 0) {
-            LOG_WARN("A2BW reset sequence failed (ret %d)", ret);
+            LOG_WRN("A2BW reset sequence failed (ret %d)", ret);
             goto next_attempt;
         }
 
@@ -491,28 +491,28 @@ static int tlv493d_a2bw_initialize_sensor(const struct device *dev)
         // Step 3: Read and verify version register
         ret = tlv493d_a2bw_read_version(dev);
         if (ret < 0) {
-            LOG_WARN("Version register read failed (ret %d)", ret);
+            LOG_WRN("Version register read failed (ret %d)", ret);
             goto next_attempt;
         }
 
         // Step 4: Check diagnostic status
         ret = tlv493d_a2bw_check_diagnostic(dev);
         if (ret < 0) {
-            LOG_WARN("Diagnostic check failed (ret %d)", ret);
+            LOG_WRN("Diagnostic check failed (ret %d)", ret);
             goto next_attempt;
         }
 
         // Step 5: Configure sensor
         ret = tlv493d_a2bw_configure_sensor(dev);
         if (ret < 0) {
-            LOG_WARN("Sensor configuration failed (ret %d)", ret);
+            LOG_WRN("Sensor configuration failed (ret %d)", ret);
             goto next_attempt;
         }
 
         // Step 6: Verify configuration was successful
         ret = tlv493d_a2bw_check_diagnostic(dev);
         if (ret < 0) {
-            LOG_WARN("Post-configuration diagnostic check failed (ret %d)", ret);
+            LOG_WRN("Post-configuration diagnostic check failed (ret %d)", ret);
             goto next_attempt;
         }
 
@@ -520,7 +520,7 @@ static int tlv493d_a2bw_initialize_sensor(const struct device *dev)
         uint8_t test_read;
         ret = tlx493d_read_reg(dev, TLV493D_REG_BX_MSB, &test_read);
         if (ret < 0) {
-            LOG_WARN("Test data read failed (ret %d)", ret);
+            LOG_WRN("Test data read failed (ret %d)", ret);
             goto next_attempt;
         }
 
@@ -608,7 +608,7 @@ static int tlx493d_a2bw_read_sensor_data(const struct device *dev)
     }
     
     if (((diag & TLV493D_DIAG_P) != 0) != calc_parity) {
-        LOG_WARN("Bus parity error detected - data may be corrupt");
+        LOG_WRN("Bus parity error detected - data may be corrupt");
     }
     
     // A2BW data format: 12-bit values
@@ -833,14 +833,14 @@ static int tlx493d_init(const struct device *dev)
         .addr_pin_high = DT_INST_PROP_OR(inst, addr_pin_high, false), \
         .z_press_threshold = DT_INST_PROP_OR(inst, z_press_threshold, Z_PRESS_THRESHOLD_DEFAULT), \
         .z_hysteresis = DT_INST_PROP_OR(inst, z_hysteresis, Z_HYSTERESIS_DEFAULT), \
-        .normal_binding = COND_CODE_1(DT_INST_NODE_HAS_PROP(inst, normal_binding), \
+        .normal_binding = COND_CODE_1(DT_INST_NODE_HAS_PROP(inst, normal_bindings), \
                                       (ZMK_KEYMAP_EXTRACT_BINDING(0, DT_DRV_INST(inst))), \
                                       ({})), \
-        .pressed_binding = COND_CODE_1(DT_INST_NODE_HAS_PROP(inst, pressed_binding), \
+        .pressed_binding = COND_CODE_1(DT_INST_NODE_HAS_PROP(inst, pressed_bindings), \
                                        (ZMK_KEYMAP_EXTRACT_BINDING(1, DT_DRV_INST(inst))), \
                                        ({})), \
-        .has_normal_binding = DT_INST_NODE_HAS_PROP(inst, normal_binding), \
-        .has_pressed_binding = DT_INST_NODE_HAS_PROP(inst, pressed_binding), \
+        .has_normal_binding = DT_INST_NODE_HAS_PROP(inst, normal_bindings), \
+        .has_pressed_binding = DT_INST_NODE_HAS_PROP(inst, pressed_bindings), \
     }; \
     DEVICE_DT_INST_DEFINE(inst, tlx493d_init, NULL, \
                           &tlx493d_data_##inst, &tlx493d_config_##inst, \
