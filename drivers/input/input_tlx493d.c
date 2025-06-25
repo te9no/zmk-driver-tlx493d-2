@@ -10,12 +10,12 @@
 #include <zephyr/input/input.h>
 #include <zephyr/kernel.h>
 #include <zephyr/logging/log.h>
+#include <zephyr/dt-bindings/input/input-event-codes.h>
 #include <stdio.h>
 #include <string.h>
 #include <stdlib.h> // For abs()
-#include <zmk/drivers/sensor/tlx493d_state.h>
 #include <zmk/behavior.h>
-#include <zmk/keymap.h>
+#include <drivers/behavior.h>
 
 LOG_MODULE_REGISTER(tlx493d, CONFIG_INPUT_LOG_LEVEL);
 
@@ -132,10 +132,6 @@ struct tlx493d_config {
     bool addr_pin_high;
     int16_t z_press_threshold;
     int16_t z_hysteresis;
-    struct zmk_behavior_binding normal_binding;
-    struct zmk_behavior_binding pressed_binding;
-    bool has_normal_binding;
-    bool has_pressed_binding;
 };
 
 struct tlx493d_data {
@@ -755,36 +751,20 @@ static void tlx493d_work_handler(struct k_work *work) {
         LOG_DBG("Z-axis released: delta_z=%d", delta_z);
     }
 
-    // Z軸状態変化の検出
+    // Z軸状態変化の検出とログ出力
     if (data->z_pressed != data->prev_z_pressed) {
-        // Z軸状態を共有状態システムに通知
-        tlx493d_set_z_axis_pressed(data->z_pressed);
         LOG_INF("Z-axis state changed: %s", data->z_pressed ? "PRESSED" : "RELEASED");
         data->prev_z_pressed = data->z_pressed;
     }
 
-    // XY移動の処理（Z軸状態に依存）
+    // XY移動の処理
     if (abs(delta_x) > XY_DEADZONE || abs(delta_y) > XY_DEADZONE) {
-        // 設定されたbehavior bindingを実行
-        struct zmk_behavior_binding_event event = {
-            .layer = 0,
-            .position = 0,
-            .timestamp = k_uptime_get(),
-        };
+        LOG_DBG("XY movement detected: dx=%d, dy=%d, z_pressed=%s", 
+                delta_x, delta_y, data->z_pressed ? "true" : "false");
         
-        if (data->z_pressed && config->has_pressed_binding) {
-            // 押し込み状態: pressed_bindingを実行
-            LOG_DBG("XY movement in pressed state: dx=%d, dy=%d", delta_x, delta_y);
-            zmk_behavior_invoke_binding(&config->pressed_binding, event, true);
-        } else if (!data->z_pressed && config->has_normal_binding) {
-            // 通常状態: normal_bindingを実行
-            LOG_DBG("XY movement in normal state: dx=%d, dy=%d", delta_x, delta_y);
-            zmk_behavior_invoke_binding(&config->normal_binding, event, true);
-        }
-        
-        // 相対移動イベントも引き続き送信（input processorで処理される）
-        input_report_rel(dev, INPUT_REL_X, delta_x, false, K_FOREVER);
-        input_report_rel(dev, INPUT_REL_Y, delta_y, false, K_FOREVER);
+        // 相対移動イベントを送信（input processorで処理される）
+        input_report_rel(dev, INPUT_REL_X, delta_x, false, K_NO_WAIT);
+        input_report_rel(dev, INPUT_REL_Y, delta_y, true, K_NO_WAIT);
         report_sync = true;
     }
 
@@ -833,14 +813,6 @@ static int tlx493d_init(const struct device *dev)
         .addr_pin_high = DT_INST_PROP_OR(inst, addr_pin_high, false), \
         .z_press_threshold = DT_INST_PROP_OR(inst, z_press_threshold, Z_PRESS_THRESHOLD_DEFAULT), \
         .z_hysteresis = DT_INST_PROP_OR(inst, z_hysteresis, Z_HYSTERESIS_DEFAULT), \
-        .normal_binding = COND_CODE_1(DT_INST_NODE_HAS_PROP(inst, normal_bindings), \
-                                      (ZMK_KEYMAP_EXTRACT_BINDING(0, DT_DRV_INST(inst))), \
-                                      ({})), \
-        .pressed_binding = COND_CODE_1(DT_INST_NODE_HAS_PROP(inst, pressed_bindings), \
-                                       (ZMK_KEYMAP_EXTRACT_BINDING(1, DT_DRV_INST(inst))), \
-                                       ({})), \
-        .has_normal_binding = DT_INST_NODE_HAS_PROP(inst, normal_bindings), \
-        .has_pressed_binding = DT_INST_NODE_HAS_PROP(inst, pressed_bindings), \
     }; \
     DEVICE_DT_INST_DEFINE(inst, tlx493d_init, NULL, \
                           &tlx493d_data_##inst, &tlx493d_config_##inst, \
