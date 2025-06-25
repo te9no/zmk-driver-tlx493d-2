@@ -5,13 +5,8 @@
 
 #define DT_DRV_COMPAT infineon_tlx493d_a2bw
 
-/* Include devicetree header first */
-#include <zephyr/devicetree.h>
-
-/* Only compile if TLX493D device is present in device tree */
-#if DT_HAS_COMPAT_STATUS_OKAY(infineon_tlx493d_a2bw)
-
 #include <zephyr/device.h>
+#include <zephyr/devicetree.h>
 #include <zephyr/drivers/i2c.h>
 #include <zephyr/input/input.h>
 #include <zephyr/kernel.h>
@@ -826,5 +821,3 @@ static int tlx493d_init(const struct device *dev)
                           NULL);
 
 DT_INST_FOREACH_STATUS_OKAY(TLX493D_DEFINE)
-
-#endif /* DT_HAS_COMPAT_STATUS_OKAY(infineon_tlx493d_a2bw) */
