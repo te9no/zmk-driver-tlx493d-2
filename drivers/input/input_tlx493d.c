@@ -17,6 +17,7 @@
 #include <stdlib.h> // For abs()
 #include <zmk/behavior.h>
 #include <drivers/behavior.h>
+#include <zmk/keymap.h>
 
 LOG_MODULE_REGISTER(tlx493d, CONFIG_INPUT_LOG_LEVEL);
 
@@ -133,6 +134,8 @@ struct tlx493d_config {
     bool addr_pin_high;
     int16_t z_press_threshold;
     int16_t z_hysteresis;
+    struct zmk_behavior_binding normal_binding;
+    struct zmk_behavior_binding pressed_binding;
 };
 
 struct tlx493d_data {
@@ -752,9 +755,43 @@ static void tlx493d_work_handler(struct k_work *work) {
         LOG_DBG("Z-axis released: delta_z=%d", delta_z);
     }
 
-    // Z軸状態変化の検出とログ出力
+    // Z軸状態変化の検出とbehavior binding呼び出し
     if (data->z_pressed != data->prev_z_pressed) {
         LOG_INF("Z-axis state changed: %s", data->z_pressed ? "PRESSED" : "RELEASED");
+        
+        // behavior bindingが設定されていれば呼び出す
+        struct zmk_behavior_binding_event event = {
+            .position = 0,
+            .timestamp = k_uptime_get(),
+#if IS_ENABLED(CONFIG_ZMK_SPLIT)
+            .source = ZMK_POSITION_STATE_CHANGE_SOURCE_LOCAL,
+#endif
+        };
+        
+        if (data->z_pressed) {
+            // 押し込み状態: pressed-bindingを有効化
+            if (config->pressed_binding.behavior_dev != NULL) {
+                zmk_behavior_invoke_binding(&config->pressed_binding, event, true);
+                LOG_DBG("Invoked pressed-binding");
+            }
+            // 通常状態のbindingを無効化
+            if (config->normal_binding.behavior_dev != NULL) {
+                zmk_behavior_invoke_binding(&config->normal_binding, event, false);
+                LOG_DBG("Released normal-binding");
+            }
+        } else {
+            // 通常状態: normal-bindingを有効化
+            if (config->normal_binding.behavior_dev != NULL) {
+                zmk_behavior_invoke_binding(&config->normal_binding, event, true);
+                LOG_DBG("Invoked normal-binding");
+            }
+            // 押し込み状態のbindingを無効化
+            if (config->pressed_binding.behavior_dev != NULL) {
+                zmk_behavior_invoke_binding(&config->pressed_binding, event, false);
+                LOG_DBG("Released pressed-binding");
+            }
+        }
+        
         data->prev_z_pressed = data->z_pressed;
     }
 
@@ -814,6 +851,24 @@ static int tlx493d_init(const struct device *dev)
         .addr_pin_high = DT_INST_PROP_OR(inst, addr_pin_high, false), \
         .z_press_threshold = DT_INST_PROP_OR(inst, z_press_threshold, Z_PRESS_THRESHOLD_DEFAULT), \
         .z_hysteresis = DT_INST_PROP_OR(inst, z_hysteresis, Z_HYSTERESIS_DEFAULT), \
+        .normal_binding = COND_CODE_1(DT_INST_NODE_HAS_PROP(inst, normal_binding), \
+            ({ \
+                .behavior_dev = DEVICE_DT_NAME(DT_INST_PHANDLE_BY_IDX(inst, normal_binding, 0)), \
+                .param1 = COND_CODE_0(DT_INST_PHA_HAS_CELL_AT_IDX(inst, normal_binding, 0, param1), (0), \
+                                      (DT_INST_PHA_BY_IDX(inst, normal_binding, 0, param1))), \
+                .param2 = COND_CODE_0(DT_INST_PHA_HAS_CELL_AT_IDX(inst, normal_binding, 0, param2), (0), \
+                                      (DT_INST_PHA_BY_IDX(inst, normal_binding, 0, param2))), \
+            }), \
+            ({.behavior_dev = NULL})), \
+        .pressed_binding = COND_CODE_1(DT_INST_NODE_HAS_PROP(inst, pressed_binding), \
+            ({ \
+                .behavior_dev = DEVICE_DT_NAME(DT_INST_PHANDLE_BY_IDX(inst, pressed_binding, 0)), \
+                .param1 = COND_CODE_0(DT_INST_PHA_HAS_CELL_AT_IDX(inst, pressed_binding, 0, param1), (0), \
+                                      (DT_INST_PHA_BY_IDX(inst, pressed_binding, 0, param1))), \
+                .param2 = COND_CODE_0(DT_INST_PHA_HAS_CELL_AT_IDX(inst, pressed_binding, 0, param2), (0), \
+                                      (DT_INST_PHA_BY_IDX(inst, pressed_binding, 0, param2))), \
+            }), \
+            ({.behavior_dev = NULL})), \
     }; \
     DEVICE_DT_INST_DEFINE(inst, tlx493d_init, NULL, \
                           &tlx493d_data_##inst, &tlx493d_config_##inst, \
