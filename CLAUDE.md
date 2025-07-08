@@ -6,6 +6,12 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 これはZMK (Zephyr Mechanical Keyboard) ファームウェア用のInfineon TLX493D-A2BW 3次元磁気センサードライバーモジュールです。このドライバーはTLX493D-A2BW磁気センサーからの入力を読み取り、Z軸状態依存のマウス操作（通常状態時は中ボタン+移動、押し込み状態時はSHIFT+中ボタン+移動）を生成します。
 
+## 実装にあたっての注意事項
+これまでこのセンサーを動作させるためにたくさんの検証のためにお金と時間を費やしてきました。
+これは3度目の挑戦でありますから、以下のアプローチを順守してください。
+１．以下の公式ライブラリを使用した実装にする。
+/home/tatuy/zmk-workspace/zmk-driver-tlx493d-3/drivers/lib
+
 ## アーキテクチャ
 
 ### 主要コンポーネント
@@ -20,7 +26,6 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
    - ハイステリシス機能による動き検出
    - A2BW診断レジスタによるデータ整合性チェック
    - パリティビット計算と検証機能
-   - フレームカウンター(FRM)による ADC hang-up 検出と復帰
 
 2. **状態管理システム**: `src/tlx493d_state.c`
    - Z軸状態の共有管理（スレッドセーフ）
@@ -155,7 +160,9 @@ west build
 **MANDATORY BUILD CHECK**: After any implementation or modification, verify that the build passes by running the following command:
 
 ```bash
-west build -p -d build/MKB -b seeeduino_xiao_ble -S "zmk-usb-logging studio-rpc-usb-uart" -- -DSHIELD=MKB_L_RZT -DZMK_CONFIG="/workspaces/zmk-config/zmk-config-MKB-1/" -DZMK_EXTRA_MODULES="/workspaces/zmk-modules/zmk-rgbled-widget/;/workspaces/zmk-modules/zmk-pmw3610-driver;/workspaces/zmk-modules/zmk-nice-oled;/workspaces/zmk-modules/zmk-analog-input-driver;/workspaces/zmk-modules/zmk-input-processor-keybind;/workspaces/zmk-modules/zmk-driver-tlx493d-2;/workspaces/zmk-modules/zmk-layout-shift"  -DCONFIG_ZMK_STUDIO=y
+export ZMK_CONFIG=zmk-config-MKB2
+just init
+XDG_RUNTIME_DIR=/tmp just build all
 ```
 
 If build fails, fix the issue and try again until it passes.

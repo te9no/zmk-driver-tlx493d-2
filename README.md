@@ -96,21 +96,30 @@ magnet_listener: magnet_listener {
 
 ## Technical Details
 
+### Implementation (Phase 1-2 Complete)
+- **Official Library Knowledge**: Utilizes Infineon A2BW-specific initialization and data format
+- **Improved Architecture**: Clean separation between sensor driver and behavior logic
+- **Unified State Management**: Single source of truth for Z-axis state across modules
+- **A2BW-Optimized**: 12-bit data format, proper reset sequence, diagnostic validation
+
 ### Operation
-1. **Sensor Reading**: Continuously reads X, Y, Z magnetic field values
-2. **Calibration**: Auto-calibrates origin point for relative movement
-3. **State Detection**: Compares Z-axis displacement against threshold with hysteresis
-4. **Behavior Invocation**: Triggers configured behaviors on state changes
-5. **Input Reporting**: Reports relative X/Y movement as input events
+1. **A2BW Initialization**: Uses official reset sequence (0xFF×2 → 0x00×2 + 30μs delay)
+2. **Sensor Reading**: Reads 12-bit magnetic field values with proper sign extension
+3. **Calibration**: Auto-calibrates origin point for relative movement
+4. **State Detection**: Compares Z-axis displacement against threshold with hysteresis
+5. **State Update**: Updates global state for behavior system consumption
+6. **Input Reporting**: Reports relative X/Y movement as input events
 
 ### State Machine
 - Normal state → Pressed state: When `abs(delta_z) > z-press-threshold`
 - Pressed state → Normal state: When `abs(delta_z) < (z-press-threshold - z-hysteresis)`
+- Global state synchronized via `tlx493d_set_z_axis_pressed()`
 
 ### Error Handling
-- Automatic I2C bus recovery
-- Sensor re-initialization on consecutive errors
-- Frame counter monitoring for hang-up detection
+- A2BW-specific reset and validation
+- Automatic sensor re-initialization on errors
+- Diagnostic register monitoring (PD0/PD3 bits)
+- Frame counter validation
 
 ## Troubleshooting
 

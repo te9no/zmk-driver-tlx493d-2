@@ -19,9 +19,10 @@
 #include <drivers/behavior.h>
 #include <zmk/keymap.h>
 
-#include <zmk/drivers/sensor/tlx493d_state.h>
-
-// A2BW register definitions from official library
+// Infineon TLX493D official library includes
+#include "../lib/tlx493d.h"
+#include "../lib/TLx493D_A2BW.h"
+#include "tlx493d_zephyr_bridge.h"
 
 LOG_MODULE_REGISTER(tlx493d, CONFIG_INPUT_LOG_LEVEL);
 
@@ -67,6 +68,7 @@ struct tlx493d_config {
 
 struct tlx493d_data {
     const struct device *dev;
+    TLx493D_t sensor;         // Infineon official library sensor instance
     int16_t x;
     int16_t y;
     int16_t z;
@@ -94,52 +96,37 @@ static void tlx493d_calibrate(const struct device *dev);
 static void generate_bar_graph(int16_t value, char *buffer, size_t buffer_size);
 
 /**
- * @brief A2BW専用センサー初期化（改良版、公式ライブラリ知識活用）
+ * @brief A2BW専用センサー初期化（公式ライブラリ使用）
  */
 static int tlv493d_a2bw_initialize_sensor(const struct device *dev)
 {
     struct tlx493d_data *data = dev->data;
     const struct tlx493d_config *config = dev->config;
     int retry_count = 0;
-    int ret;
 
-    LOG_INF("Starting TLV493D-A2BW sensor initialization (improved implementation)");
+    LOG_INF("Starting TLV493D-A2BW sensor initialization using official library");
+
+    // Set up Zephyr I2C bridge for official library
+    tlx493d_set_zephyr_i2c(&config->i2c);
 
     while (retry_count < MAX_INIT_RETRIES) {
         LOG_DBG("A2BW initialization attempt %d/%d", retry_count + 1, MAX_INIT_RETRIES);
 
-        // A2BW reset sequence (0xFF x2, 0x00 x2, 30μs delay)
-        uint8_t reset_seq[] = {0xFF, 0xFF, 0x00, 0x00};
-        for (int i = 0; i < 4; i++) {
-            ret = i2c_write_dt(&config->i2c, &reset_seq[i], 1);
-            if (ret < 0) {
-                LOG_WRN("Reset sequence step %d failed: %d", i, ret);
-                goto next_attempt;
-            }
-        }
-        k_usleep(30);  // 30μs delay as per A2BW spec
-
-        // Wait for sensor to settle
-        k_msleep(100);
-
-        // Read version register to verify communication
-        uint8_t version;
-        ret = i2c_reg_read_byte_dt(&config->i2c, 0x16, &version);
-        if (ret == 0) {
-            uint8_t type = (version >> 4) & 0x03;
-            uint8_t hwv = version & 0x0F;
-            LOG_INF("A2BW detected: TYPE=0x%X, HWV=0x%X", type, hwv);
-            
-            if (type == 0x3) {  // Expected TYPE for A2BW
-                data->initialized = true;
-                data->init_retries = 0;
-                data->data_valid = false;
-                LOG_INF("TLV493D-A2BW sensor initialization completed successfully");
-                return 0;
+        // Initialize sensor using official library
+        if (tlx493d_init(&data->sensor, TLx493D_A2BW_e)) {
+            // Set default configuration
+            if (tlx493d_setDefaultConfig(&data->sensor)) {
+                // Verify sensor is functional
+                if (tlx493d_isFunctional(&data->sensor)) {
+                    data->initialized = true;
+                    data->init_retries = 0;
+                    data->data_valid = false;
+                    LOG_INF("TLV493D-A2BW sensor initialization completed successfully");
+                    return 0;
+                }
             }
         }
 
-    next_attempt:
         retry_count++;
         k_msleep(INIT_STEP_DELAY_MS * (1 << retry_count));
     }
@@ -149,52 +136,42 @@ static int tlv493d_a2bw_initialize_sensor(const struct device *dev)
 }
 
 /**
- * @brief A2BWセンサーデータ読み取り（改良版、A2BW専用最適化）
+ * @brief A2BWセンサーデータ読み取り（公式ライブラリ使用）
  */
 static int tlx493d_a2bw_read_sensor_data(const struct device *dev)
 {
     struct tlx493d_data *data = dev->data;
-    const struct tlx493d_config *config = dev->config;
-    uint8_t raw_data[7]; // Read registers 0x00-0x06
-    int ret;
     char x_bar[BAR_GRAPH_WIDTH + 1], y_bar[BAR_GRAPH_WIDTH + 1], z_bar[BAR_GRAPH_WIDTH + 1];
 
     if (!data->initialized) {
         return -ENODEV;
     }
 
-    // Read measurement and diagnostic registers (0x00-0x06)
-    ret = i2c_burst_read_dt(&config->i2c, 0x00, raw_data, 7);
-    if (ret < 0) {
-        LOG_ERR("Failed to read A2BW sensor data (ret %d)", ret);
+    // Read all registers using official library
+    if (!tlx493d_readRegisters(&data->sensor)) {
+        LOG_ERR("Failed to read A2BW sensor registers");
         data->data_valid = false;
-        return ret;
+        return -EIO;
     }
-    
-    // Check diagnostic register for data validity (register 0x06)
-    uint8_t diag = raw_data[6];
-    if (!(diag & 0x04) || !(diag & 0x08)) {  // PD0 and PD3 bits
-        LOG_DBG("ADC conversion not complete - data invalid");
+
+    // Check if data is valid
+    if (!tlx493d_hasValidData(&data->sensor)) {
+        LOG_DBG("Sensor data not valid yet");
         data->data_valid = false;
         return -EAGAIN;
     }
-    
-    // A2BW data format: 12-bit values with specific bit layout
-    // Bx: MSB in reg[0], LSB[7:4] in reg[4]
-    // By: MSB in reg[1], LSB[3:0] in reg[4] 
-    // Bz: MSB in reg[2], LSB[3:0] in reg[5]
-    // Temp: MSB in reg[3], LSB[7:6] in reg[5]
-    
-    int16_t bx_val = (raw_data[0] << 4) | (raw_data[4] >> 4);
-    int16_t by_val = (raw_data[1] << 4) | (raw_data[4] & 0x0F);
-    int16_t bz_val = (raw_data[2] << 4) | (raw_data[5] & 0x0F);
-    int16_t temp_val = (raw_data[3] << 4) | ((raw_data[5] >> 6) & 0x03);
 
-    // Apply sign extension for 12-bit two's complement values
-    data->x = (bx_val << 4) >> 4;
-    data->y = (by_val << 4) >> 4;
-    data->z = (bz_val << 4) >> 4;
-    data->temp = (temp_val << 4) >> 4;
+    // Get raw magnetic field values using official library
+    if (!tlx493d_getRawMagneticField(&data->sensor, &data->x, &data->y, &data->z)) {
+        LOG_ERR("Failed to get raw magnetic field data");
+        data->data_valid = false;
+        return -EIO;
+    }
+
+    // Get raw temperature if needed
+    if (!tlx493d_getRawTemperature(&data->sensor, &data->temp)) {
+        LOG_DBG("Failed to get temperature data (non-critical)");
+    }
 
     data->data_valid = true;
 
@@ -206,7 +183,7 @@ static int tlx493d_a2bw_read_sensor_data(const struct device *dev)
         LOG_INF("A2BW X: %5d [%s]", data->x, x_bar);
         LOG_INF("A2BW Y: %5d [%s]", data->y, y_bar);
         LOG_INF("A2BW Z: %5d [%s]", data->z, z_bar);
-        LOG_DBG("Frame: %d, Temp: %d", diag & 0x03, data->temp);
+        LOG_DBG("Temp: %d", data->temp);
     }
 
     return 0;
@@ -324,12 +301,42 @@ static void tlx493d_work_handler(struct k_work *work) {
         LOG_DBG("Z-axis released: delta_z=%d", delta_z);
     }
 
-    // Z軸状態変化の検出とグローバル状態更新
+    // Z軸状態変化の検出とbehavior binding呼び出し
     if (data->z_pressed != data->prev_z_pressed) {
         LOG_INF("Z-axis state changed: %s", data->z_pressed ? "PRESSED" : "RELEASED");
         
-        // グローバル状態を更新（behavior_z_axis_morphで使用される）
-        tlx493d_set_z_axis_pressed(data->z_pressed);
+        // behavior bindingが設定されていれば呼び出す
+        struct zmk_behavior_binding_event event = {
+            .position = 0,
+            .timestamp = k_uptime_get(),
+#if IS_ENABLED(CONFIG_ZMK_SPLIT)
+            .source = ZMK_POSITION_STATE_CHANGE_SOURCE_LOCAL,
+#endif
+        };
+        
+        if (data->z_pressed) {
+            // 押し込み状態: pressed-bindingを有効化
+            if (config->pressed_binding.behavior_dev != NULL) {
+                zmk_behavior_invoke_binding(&config->pressed_binding, event, true);
+                LOG_DBG("Invoked pressed-binding");
+            }
+            // 通常状態のbindingを無効化
+            if (config->normal_binding.behavior_dev != NULL) {
+                zmk_behavior_invoke_binding(&config->normal_binding, event, false);
+                LOG_DBG("Released normal-binding");
+            }
+        } else {
+            // 通常状態: normal-bindingを有効化
+            if (config->normal_binding.behavior_dev != NULL) {
+                zmk_behavior_invoke_binding(&config->normal_binding, event, true);
+                LOG_DBG("Invoked normal-binding");
+            }
+            // 押し込み状態のbindingを無効化
+            if (config->pressed_binding.behavior_dev != NULL) {
+                zmk_behavior_invoke_binding(&config->pressed_binding, event, false);
+                LOG_DBG("Released pressed-binding");
+            }
+        }
         
         data->prev_z_pressed = data->z_pressed;
     }
@@ -387,9 +394,24 @@ static int tlx493d_init(const struct device *dev)
         .addr_pin_high = DT_INST_PROP_OR(inst, addr_pin_high, false), \
         .z_press_threshold = DT_INST_PROP_OR(inst, z_press_threshold, Z_PRESS_THRESHOLD_DEFAULT), \
         .z_hysteresis = DT_INST_PROP_OR(inst, z_hysteresis, Z_HYSTERESIS_DEFAULT), \
-        /* Direct behavior bindings removed - use zmk,behavior-z-axis-morph instead */ \
-        /* .normal_binding = ..., */ \
-        /* .pressed_binding = ..., */
+        .normal_binding = COND_CODE_1(DT_INST_NODE_HAS_PROP(inst, normal_binding), \
+            ({ \
+                .behavior_dev = DEVICE_DT_NAME(DT_INST_PHANDLE_BY_IDX(inst, normal_binding, 0)), \
+                .param1 = COND_CODE_0(DT_INST_PHA_HAS_CELL_AT_IDX(inst, normal_binding, 0, param1), (0), \
+                                      (DT_INST_PHA_BY_IDX(inst, normal_binding, 0, param1))), \
+                .param2 = COND_CODE_0(DT_INST_PHA_HAS_CELL_AT_IDX(inst, normal_binding, 0, param2), (0), \
+                                      (DT_INST_PHA_BY_IDX(inst, normal_binding, 0, param2))), \
+            }), \
+            ({.behavior_dev = NULL})), \
+        .pressed_binding = COND_CODE_1(DT_INST_NODE_HAS_PROP(inst, pressed_binding), \
+            ({ \
+                .behavior_dev = DEVICE_DT_NAME(DT_INST_PHANDLE_BY_IDX(inst, pressed_binding, 0)), \
+                .param1 = COND_CODE_0(DT_INST_PHA_HAS_CELL_AT_IDX(inst, pressed_binding, 0, param1), (0), \
+                                      (DT_INST_PHA_BY_IDX(inst, pressed_binding, 0, param1))), \
+                .param2 = COND_CODE_0(DT_INST_PHA_HAS_CELL_AT_IDX(inst, pressed_binding, 0, param2), (0), \
+                                      (DT_INST_PHA_BY_IDX(inst, pressed_binding, 0, param2))), \
+            }), \
+            ({.behavior_dev = NULL})), \
     }; \
     DEVICE_DT_INST_DEFINE(inst, tlx493d_init, NULL, \
                           &tlx493d_data_##inst, &tlx493d_config_##inst, \

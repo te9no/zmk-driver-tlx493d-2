@@ -24,18 +24,21 @@ properties:
     default: 10
     description: Z-axis hysteresis to prevent bounce
   
-  normal-binding:
-    type: phandle-array
-    specifier-space: zmk,behavior-binding
-    required: false
-    description: |
-      Behavior binding to invoke when sensor is in normal state (Z-axis not pressed).
-      Example: normal-binding = <&mkp MCLK>;
-  
-  pressed-binding:
-    type: phandle-array
-    specifier-space: zmk,behavior-binding
-    required: false
-    description: |
-      Behavior binding to invoke when sensor is in pressed state (Z-axis pressed).
-      Example: pressed-binding = <&mkp MCLK &kp LSHIFT>;
+  # Note: Direct behavior bindings are deprecated
+  # Use zmk,behavior-z-axis-morph behavior instead for state-dependent bindings
+  # 
+  # normal-binding:
+  #   type: phandle-array  
+  #   specifier-space: zmk,behavior-binding
+  #   required: false
+  #   description: |
+  #     Behavior binding to invoke when sensor is in normal state (Z-axis not pressed).
+  #     Example: normal-binding = <&mkp MCLK>;
+  # 
+  # pressed-binding:
+  #   type: phandle-array
+  #   specifier-space: zmk,behavior-binding
+  #   required: false
+  #   description: |
+  #     Behavior binding to invoke when sensor is in pressed state (Z-axis pressed).
+  #     Example: pressed-binding = <&mkp MCLK &kp LSHIFT>;
