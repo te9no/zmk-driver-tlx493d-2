@@ -389,7 +389,7 @@ static int tlx493d_init(const struct device *dev)
         .z_hysteresis = DT_INST_PROP_OR(inst, z_hysteresis, Z_HYSTERESIS_DEFAULT), \
         /* Direct behavior bindings removed - use zmk,behavior-z-axis-morph instead */ \
         /* .normal_binding = ..., */ \
-        /* .pressed_binding = ..., */
+        /* .pressed_binding = ..., */ \
     }; \
     DEVICE_DT_INST_DEFINE(inst, tlx493d_init, NULL, \
                           &tlx493d_data_##inst, &tlx493d_config_##inst, \
