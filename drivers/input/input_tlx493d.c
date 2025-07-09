@@ -18,12 +18,86 @@
 #include <zmk/behavior.h>
 #include <drivers/behavior.h>
 #include <zmk/keymap.h>
-
 #include <zmk/drivers/sensor/tlx493d_state.h>
+
+LOG_MODULE_REGISTER(tlx493d, CONFIG_INPUT_LOG_LEVEL);
 
 // A2BW register definitions from official library
 
-LOG_MODULE_REGISTER(tlx493d, CONFIG_INPUT_LOG_LEVEL);
+// Custom I2C read function for TLX493D A2BW
+static int tlx493d_i2c_reg_read_byte(const struct i2c_dt_spec *i2c_spec, uint8_t reg_addr, uint8_t *value) {
+    int ret;
+    
+    // Phase 1: Write register address
+    ret = i2c_write_dt(i2c_spec, &reg_addr, 1);
+    if (ret < 0) {
+        LOG_ERR("Failed to write register address 0x%02X: %d", reg_addr, ret);
+        return ret;
+    }
+    
+    // Small delay to ensure proper timing
+    k_usleep(10);
+    
+    // Phase 2: Read data using separate read operation
+    ret = i2c_read_dt(i2c_spec, value, 1);
+    if (ret < 0) {
+        LOG_ERR("Failed to read from register 0x%02X: %d", reg_addr, ret);
+        return ret;
+    }
+    
+    LOG_DBG("Successfully read 0x%02X from register 0x%02X", *value, reg_addr);
+    return 0;
+}
+
+// Alternative implementation using manual message construction
+static int tlx493d_i2c_reg_read_byte_manual(const struct i2c_dt_spec *i2c_spec, uint8_t reg_addr, uint8_t *value) {
+    struct i2c_msg msgs[2];
+    int ret;
+    
+    // Message 1: Write register address
+    msgs[0].buf = &reg_addr;
+    msgs[0].len = 1;
+    msgs[0].flags = I2C_MSG_WRITE;
+    
+    // Message 2: Read data
+    msgs[1].buf = value;
+    msgs[1].len = 1;
+    msgs[1].flags = I2C_MSG_READ | I2C_MSG_RESTART;
+    
+    ret = i2c_transfer_dt(i2c_spec, msgs, 2);
+    if (ret < 0) {
+        LOG_ERR("I2C transfer failed for register 0x%02X: %d", reg_addr, ret);
+        return ret;
+    }
+    
+    LOG_DBG("Manual read: 0x%02X from register 0x%02X", *value, reg_addr);
+    return 0;
+}
+
+// Custom burst read function for TLX493D A2BW
+static int tlx493d_i2c_burst_read(const struct i2c_dt_spec *i2c_spec, uint8_t start_addr, uint8_t *data, size_t len) {
+    struct i2c_msg msgs[2];
+    int ret;
+    
+    // Message 1: Write start register address
+    msgs[0].buf = &start_addr;
+    msgs[0].len = 1;
+    msgs[0].flags = I2C_MSG_WRITE;
+    
+    // Message 2: Read multiple bytes
+    msgs[1].buf = data;
+    msgs[1].len = len;
+    msgs[1].flags = I2C_MSG_READ | I2C_MSG_RESTART;
+    
+    ret = i2c_transfer_dt(i2c_spec, msgs, 2);
+    if (ret < 0) {
+        LOG_ERR("I2C burst read failed from register 0x%02X: %d", start_addr, ret);
+        return ret;
+    }
+    
+    LOG_DBG("Burst read %zu bytes from register 0x%02X", len, start_addr);
+    return 0;
+}
 
 // Using Infineon official library - register definitions are in the library
 
@@ -104,27 +178,34 @@ static int tlv493d_a2bw_initialize_sensor(const struct device *dev)
     int ret;
 
     LOG_INF("Starting TLV493D-A2BW sensor initialization (improved implementation)");
+    LOG_INF("I2C bus: %s, Address: 0x%02X", config->i2c.bus->name, config->i2c.addr);
 
     while (retry_count < MAX_INIT_RETRIES) {
         LOG_DBG("A2BW initialization attempt %d/%d", retry_count + 1, MAX_INIT_RETRIES);
 
-        // A2BW reset sequence (0xFF x2, 0x00 x2, 30μs delay)
-        uint8_t reset_seq[] = {0xFF, 0xFF, 0x00, 0x00};
-        for (int i = 0; i < 4; i++) {
-            ret = i2c_write_dt(&config->i2c, &reset_seq[i], 1);
-            if (ret < 0) {
-                LOG_WRN("Reset sequence step %d failed: %d", i, ret);
-                goto next_attempt;
-            }
-        }
-        k_usleep(30);  // 30μs delay as per A2BW spec
+        // Check if I2C device is present with simple probe
+        uint8_t probe_data;
+        ret = i2c_read_dt(&config->i2c, &probe_data, 1);
+        LOG_INF("I2C probe result: %d (0x%02X)", ret, probe_data);
+        
+        // Skip reset sequence on first failure to test basic connectivity
+        if (retry_count > 0) {
+            // A2BW reset sequence (0xFF x2, 0x00 x2, 30μs delay)
+            uint8_t reset_seq[] = {0xFF, 0xFF, 0x00, 0x00};
+            for (int i = 0; i < 4; i++) {
+                ret = i2c_write_dt(&config->i2c, &reset_seq[i], 1);
 
-        // Wait for sensor to settle
-        k_msleep(100);
+                k_usleep(30);  // 30μs delay as per A2BW spec
+            }
+            k_usleep(30);  // 30μs delay as per A2BW spec
+        } else {
+            LOG_INF("Skipping reset sequence on first attempt to test basic I2C connectivity");
+        }
 
         // Read version register to verify communication
         uint8_t version;
-        ret = i2c_reg_read_byte_dt(&config->i2c, 0x16, &version);
+        ret = tlx493d_i2c_reg_read_byte_manual(&config->i2c, 0x16, &version);
+        LOG_INF("A2BW version read: 0x%02X (ret %d)", version, ret);
         if (ret == 0) {
             uint8_t type = (version >> 4) & 0x03;
             uint8_t hwv = version & 0x0F;
@@ -164,7 +245,7 @@ static int tlx493d_a2bw_read_sensor_data(const struct device *dev)
     }
 
     // Read measurement and diagnostic registers (0x00-0x06)
-    ret = i2c_burst_read_dt(&config->i2c, 0x00, raw_data, 7);
+    ret = tlx493d_i2c_burst_read(&config->i2c, 0x00, raw_data, 7);
     if (ret < 0) {
         LOG_ERR("Failed to read A2BW sensor data (ret %d)", ret);
         data->data_valid = false;
