@@ -1,0 +1,18 @@
+config INPUT_TLX493D
+    bool "Infineon TLX493D 3D magnetic sensor"
+    default y
+    depends on DT_HAS_INFINEON_TLX493D_A2BW_ENABLED
+    help
+      Enable driver for Infineon TLX493D 3D magnetic sensor.
+
+config INPUT_TLX493D_POLLING_INTERVAL_MS
+    int "Polling interval in milliseconds"
+    default 10
+    range 1 1000
+    help
+      Interval between sensor readings in milliseconds.
+
+# 以下は削除された設定項目（behavior_z_axis_morphを使用）
+# - INPUT_TLX493D_ROTATION_SCALER: 削除（未使用）
+# - INPUT_TLX493D_Z_THRESHOLD: 削除（デバイスツリーのz-press-thresholdを使用）
+# - POLLING_INTERVAL_MS: 削除（デバイスツリーのpolling-interval-msを使用）

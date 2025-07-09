@@ -1,0 +1,28 @@
+# Copyright (c) 2025 Manus AI
+# SPDX-License-Identifier: Apache-2.0
+
+description: |
+  Z-axis state-dependent behavior morph for TLX493D sensor
+  
+  This behavior switches between different bindings based on the Z-axis
+  state (normal/pressed) detected by the TLX493D sensor.
+  
+  Usage:
+    z_axis_morph: z_axis_morph {
+        compatible = "zmk,behavior-z-axis-morph";
+        bindings = <&mkp MCLK>, <&mkp MCLK &kp LSHIFT>;
+    };
+
+compatible: "zmk,behavior-z-axis-morph"
+
+include: one_param.yaml
+
+properties:
+  bindings:
+    type: phandle-array
+    required: true
+    description: |
+      Array of exactly 2 behaviors:
+      - Index 0: Normal state binding (Z-axis not pressed)
+      - Index 1: Pressed state binding (Z-axis pressed)
+      
