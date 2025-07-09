@@ -328,9 +328,6 @@ static void tlx493d_work_handler(struct k_work *work) {
     if (data->z_pressed != data->prev_z_pressed) {
         LOG_INF("Z-axis state changed: %s", data->z_pressed ? "PRESSED" : "RELEASED");
         
-        // グローバル状態を更新（behavior_z_axis_morphで使用される）
-        tlx493d_set_z_axis_pressed(data->z_pressed);
-        
         data->prev_z_pressed = data->z_pressed;
     }
 
@@ -389,7 +386,7 @@ static int tlx493d_init(const struct device *dev)
         .z_hysteresis = DT_INST_PROP_OR(inst, z_hysteresis, Z_HYSTERESIS_DEFAULT), \
         /* Direct behavior bindings removed - use zmk,behavior-z-axis-morph instead */ \
         /* .normal_binding = ..., */ \
-        /* .pressed_binding = ..., */
+        /* .pressed_binding = ..., */ \
     }; \
     DEVICE_DT_INST_DEFINE(inst, tlx493d_init, NULL, \
                           &tlx493d_data_##inst, &tlx493d_config_##inst, \
