@@ -410,7 +410,7 @@ static void tlx493d_work_handler(struct k_work *work) {
         LOG_INF("Z-axis state changed: %s", data->z_pressed ? "PRESSED" : "RELEASED");
         
         // グローバル状態を更新（behavior_z_axis_morphで使用される）
-        tlx493d_set_z_axis_pressed(data->z_pressed);
+        // tlx493d_set_z_axis_pressed(data->z_pressed);
         
         data->prev_z_pressed = data->z_pressed;
     }
