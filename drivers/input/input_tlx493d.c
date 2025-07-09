@@ -305,7 +305,7 @@ static void tlx493d_work_handler(struct k_work *work) {
     data->error_count = 0;
 
     if (!data->calibrated) {
-        k_work_schedule(&data->work, K_MSEC(DT_INST_PROP(0, polling_interval_ms)));
+        k_work_schedule(&data->work, K_MSEC(CONFIG_INPUT_TLX493D_POLLING_INTERVAL_MS));
         return;
     }
 
@@ -342,7 +342,7 @@ static void tlx493d_work_handler(struct k_work *work) {
         report_sync = true;
     }
 
-    k_work_schedule(&data->work, K_MSEC(DT_INST_PROP(0, polling_interval_ms)));
+    k_work_schedule(&data->work, K_MSEC(CONFIG_INPUT_TLX493D_POLLING_INTERVAL_MS));
 }
 
 /**
@@ -371,7 +371,7 @@ static int tlx493d_init(const struct device *dev)
     k_msleep(100);
 
     k_work_init_delayable(&data->work, tlx493d_work_handler);
-    k_work_schedule(&data->work, K_MSEC(DT_INST_PROP(0, polling_interval_ms)));
+    k_work_schedule(&data->work, K_MSEC(CONFIG_INPUT_TLX493D_POLLING_INTERVAL_MS));
 
     LOG_INF("TLX493D driver initialized for %s", dev->name);
     return 0;
