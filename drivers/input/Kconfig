@@ -1,7 +1,7 @@
 config INPUT_TLX493D
     bool "Infineon TLX493D 3D magnetic sensor"
     default y
-    depends on I2C
+    depends on DT_HAS_INFINEON_TLX493D_A2BW_ENABLED
     help
       Enable driver for Infineon TLX493D 3D magnetic sensor.
 

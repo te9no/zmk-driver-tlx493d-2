@@ -305,7 +305,7 @@ static void tlx493d_work_handler(struct k_work *work) {
     data->error_count = 0;
 
     if (!data->calibrated) {
-        k_work_schedule(&data->work, K_MSEC(CONFIG_INPUT_TLX493D_POLLING_INTERVAL_MS));
+        k_work_schedule(&data->work, K_MSEC(DT_INST_PROP(0, polling_interval_ms)));
         return;
     }
 
@@ -328,6 +328,9 @@ static void tlx493d_work_handler(struct k_work *work) {
     if (data->z_pressed != data->prev_z_pressed) {
         LOG_INF("Z-axis state changed: %s", data->z_pressed ? "PRESSED" : "RELEASED");
         
+        // グローバル状態を更新（behavior_z_axis_morphで使用される）
+        tlx493d_set_z_axis_pressed(data->z_pressed);
+        
         data->prev_z_pressed = data->z_pressed;
     }
 
@@ -342,7 +345,7 @@ static void tlx493d_work_handler(struct k_work *work) {
         report_sync = true;
     }
 
-    k_work_schedule(&data->work, K_MSEC(CONFIG_INPUT_TLX493D_POLLING_INTERVAL_MS));
+    k_work_schedule(&data->work, K_MSEC(DT_INST_PROP(0, polling_interval_ms)));
 }
 
 /**
@@ -371,7 +374,7 @@ static int tlx493d_init(const struct device *dev)
     k_msleep(100);
 
     k_work_init_delayable(&data->work, tlx493d_work_handler);
-    k_work_schedule(&data->work, K_MSEC(CONFIG_INPUT_TLX493D_POLLING_INTERVAL_MS));
+    k_work_schedule(&data->work, K_MSEC(DT_INST_PROP(0, polling_interval_ms)));
 
     LOG_INF("TLX493D driver initialized for %s", dev->name);
     return 0;
@@ -386,7 +389,7 @@ static int tlx493d_init(const struct device *dev)
         .z_hysteresis = DT_INST_PROP_OR(inst, z_hysteresis, Z_HYSTERESIS_DEFAULT), \
         /* Direct behavior bindings removed - use zmk,behavior-z-axis-morph instead */ \
         /* .normal_binding = ..., */ \
-        /* .pressed_binding = ..., */ \
+        /* .pressed_binding = ..., */
     }; \
     DEVICE_DT_INST_DEFINE(inst, tlx493d_init, NULL, \
                           &tlx493d_data_##inst, &tlx493d_config_##inst, \
